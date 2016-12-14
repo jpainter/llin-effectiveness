@@ -495,7 +495,20 @@ count(d, hml3235, slept)
 
 ```
 
-## GLM RR 
+
+## epitools package
+
+estimates crude RR 
+
+```{r}
+library(epitools)
+r = riskratio(d$slept, d$hml3235)  
+# str(r)
+r$measure[2,]
+
+```
+
+## GLM logistic (OR) 
 
 GLM gives estimate of overall risk, and risk ratio
 
@@ -509,7 +522,7 @@ exp(coef(glm.logistic))
 
 ```
 
-### classical log-binomial model
+### classical log-binomial model (RR)
 
 ```{r}
 library(base)
@@ -524,7 +537,7 @@ exp(cbind(OR = coef(glm.log.binomial), confint(glm.log.binomial)))
 ```
 
 
-### calssical log-binomial model with number of bednets per person predictor
+### classical log-binomial model with number of bednets per person predictor
 
 ```{r}
 # dataset combining variables
@@ -553,16 +566,7 @@ logisticTransform <- function(p) { exp(p)/(1 + exp(p)) }
 logisticTransform( coef(glm.logit) )
 ```
 
-## epitools package
 
-estimates RR but does not give estimate of risk
-```{r}
-library(epitools)
-r = riskratio(d$slept, d$hml3235)  
-# str(r)
-r$measure[2,]
-
-```
 
 ## Bayesian, maximum a postiori (MAP) rethinking package
 
@@ -588,8 +592,8 @@ precis(fit0)@output
 exp( precis(fit0)@output )  
 
 # proportion-rel risk
-logisticTransform <- function(p) { exp(p)/(1 + exp(p)) }
-logisticTransform( precis(fit0)@output )  
+# logisticTransform <- function(p) { exp(p)/(1 + exp(p)) }
+# logisticTransform( precis(fit0)@output )  
 
 ```
 
