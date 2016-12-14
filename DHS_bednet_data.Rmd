@@ -1,0 +1,1129 @@
+---
+title: "DHS Datasets"
+author: "jp"
+date: "10/5/2016"
+output:
+  html_notebook: default
+  pdf_document: default
+---
+
+```{r, include= FALSE}
+
+library(knitr)
+library(scales, quietly = TRUE)
+library(data.table)
+library(dtplyr)
+library(tidyverse, quietly = TRUE)
+library(countrycode)
+
+opts_chunk$set( echo = TRUE, cache = TRUE )
+
+# location of DHS folder.  include DHS files as: paste0( dhs, <dhs file here>)
+dhs = "../DHS/"
+```
+
+# Select country/surveys to include 
+
+```{r}
+
+source( paste0( dhs, "file_list.r") )
+
+subsahara = countrycode_data %>%
+  filter( region %in% c("Middle Africa", "Western Africa", "Eastern Africa", "Southern Africa")) %>% 
+  select( country.name, iso3c ) %>%
+  filter( !country.name %in% "Lesotho") 
+
+
+files = files %>% 
+  mutate( country.name = countrycode(country, "country.name", "country.name")) %>%
+  filter( survey!="", year >= 2000 , country.name %in% subsahara$country.name)
+
+# View(files)
+
+# not_needed = c('Bangladesh', 'Pakistan', 'Philippines', 'Comoros')
+
+survey_list = files %>% count(country, survey, year) %>% select(-n)
+# View(survey_list)
+
+nsurveys = nrow(survey_list)
+ncountries = length( unique( files$country ) )
+
+cat( "There are", nsurveys, "surveys since 2000 from",  ncountries ,"countries in Subsaharan Africa.")
+
+# kable( survey_list )
+```
+
+## Surveys with parasitemia biomarkers
+
+```{r}
+dd <-readRDS( paste0( dhs, "dictionaryNew.rds")  )  # about 6 sec
+
+parasitemia_variables = c("hml32", "hml35")
+
+parasitemia_surveys = dd %>% 
+  filter( survey != "", year >= 2000 , iso3c %in% subsahara$iso3c ) %>%
+  filter( Item_Name %in% toupper( parasitemia_variables) ,
+          value %in% 0:1 ) %>% # comment this line out to get full list of variables
+  filter( !grepl( "NA", Item_Label, ignore.case = FALSE, fixed = TRUE)  ) %>%
+        select( Item_Name, country, survey, value, year) %>%
+      count( country, survey, year, Item_Name) %>%
+    mutate( 
+        has = ifelse( n > 0 , "Y", "N" ) 
+        ) %>%
+    select( -n) %>%
+  spread( Item_Name ,  has, fill = "N" )
+
+ kable(parasitemia_surveys, row.names = TRUE)  
+  
+```
+
+# Select **individual** variables of interest for bednet study and check to see which survey file has the values
+
+```{r}
+
+individual_vars  = c( 
+        'hml32', 'hml35', 
+        'hml1', 
+        'hml19', 'hml20', 'hml12',
+        'hml16', # corrected age in years
+        "hv012", "hv025",
+        "hv001", "hv002", 'HV003', 'HHID', 'HVIDX',
+        "HV008" # date of interview
+       )
+  
+variables <- unique( toupper( individual_vars) )
+variables = variables[ order(variables) ]
+
+# translation table of dhs file codes to file names
+filecodes = data_frame( abrev  = c("kr", "br", "ir", "pr", "hr", "hr" ), 
+                            file = c("Children's Recode","Supplemental Births Recode",
+                                     "Individual Recode",
+                                     "Household Member Recode", "Household Recode", 
+                                     "Supplemental Household Recode")) 
+
+ 
+# list variables and the files where each is found
+survey_files = dd %>% semi_join( parasitemia_surveys ) %>%
+    filter( Item_Name %in% variables ) %>%
+    filter( !grepl( "NA", Item_Label, ignore.case = FALSE, fixed = TRUE) ,
+            !grepl( "Presence", Item_Label, ignore.case = FALSE, fixed = TRUE)
+            ) %>%
+    left_join( filecodes , by = "file", copy = TRUE) %>%
+    mutate( 
+        abrev = ifelse( is.na(abrev) , tolower( substr(file, 3, 4) ) , abrev)
+        ) %>%
+    left_join( filecodes , by = "abrev", copy = TRUE) %>%
+    rename( file = file.y ) %>%
+    count( Item_Name, Item_Label, country, survey, year, file ) %>%
+    mutate( has = ifelse( n > 0, "Y", NA )) %>% 
+    ungroup() %>%
+    count( Item_Name, file ) %>%
+    spread( file, nn, fill = "N" )
+
+# View(dataset_surveys)
+
+kable(survey_files)
+```
+
+# variable definitions...
+
+Select the first available definition from dictionary.  Note that some variables may be defined differently for some countries, which will not be apparent here. 
+
+```{r}
+variable_defn = dd %>% semi_join( parasitemia_surveys, by = c("country", "survey", "year") ) %>%
+    filter( Item_Name %in% variables ) %>%
+    filter( !grepl( "NA", Item_Label, ignore.case = FALSE, fixed = TRUE) ,
+            !grepl( "Presence", Item_Label, ignore.case = FALSE, fixed = TRUE)
+            ) %>%
+    left_join( filecodes , by = "file", copy = TRUE) %>%
+    mutate( 
+        abrev = ifelse( is.na(abrev) , tolower( substr(file, 3, 4) ) , abrev)
+        ) %>%
+    left_join( filecodes , by = "abrev", copy = TRUE) %>%
+    rename( file = file.y ) %>%
+    filter( grepl( "member", file, ignore.case= T)) %>%
+    count( Item_Name, Item_Label) %>%
+    select( -n) %>%
+    arrange( Item_Label ) %>%
+    as.data.frame()
+
+variable_defn
+```
+
+
+# create individual dataset. run one time after updating variables or adding surveys
+
+```{r, eval=FALSE, include = FALSE}
+source( paste0( dhs, "getSurveyGIS.R") )
+source( "load_survey_file.R") 
+
+nsurveys = nrow( parasitemia_surveys )
+
+parasitemia_surveys = arrange( parasitemia_surveys, desc(year) )
+index = row.names(parasitemia_surveys)
+
+p <- progress_estimated(nsurveys)
+
+x <- list()
+
+translate = FALSE  # optional translation of values to label.  
+  # NB: Does not work well for all variables
+
+for (i in seq_along( index )  ){
+  
+   p$pause(0.1)$tick()$print()
+  
+  .country = parasitemia_surveys[i, ]$country
+  .iso3c = countrycode( parasitemia_surveys[i, ]$country, "country.name", "iso3c")
+  .survey = parasitemia_surveys[i, ]$survey
+  .year = parasitemia_surveys[i, ]$year
+  .file = "Household Member Recode"
+  .survey_year = paste(.survey, .year)
+
+  print( paste(.country, .survey, .year, .file) )
+  
+  x[[i]] <- try( silent = TRUE,
+    load_survey_file( design = FALSE,
+                        # printout = TRUE ,  # un comment when testing
+                        vars = variables, 
+                        .country = .country, 
+                        .survey = .survey,
+                        .year = .year,
+                        .file = .file  )
+  )
+  
+      
+    if ( class(x[[i]]) == "try-error" )  next()
+     
+
+  x[[i]]$country = rep( .country, nrow(x[[i]]) )
+  x[[i]]$iso3c = rep( .iso3c, nrow(x[[i]]) )
+  x[[i]]$year = rep( .year, nrow(x[[i]]) )
+  x[[i]]$survey = rep( .survey, nrow(x[[i]]) )
+
+  # TODO: optional- relate dictionary to survey                    )
+
+  # # TODO: only for columns with >4 values (others easier to keep as numeric)
+  # # Deriving this table should happen once, before loop
+  # v = dd %>% filter( tolower(Item_Name) %in% variables) %>% group_by( Item_Name, label ) %>% 
+  #   summarise( n = n()) %>% group_by( Item_Name) %>% count(Item_Name) %>% filter(nn>4) 
+
+  if (translate){
+    
+      # refine dictionary for this country-survey 
+      dict = dd %>% filter_( ~country == .country , ~survey == .survey, ~year == .year,
+                        ~Item_Name %in% toupper(names(has_vars))
+      )
+     
+    y = x[[i]]
+  
+    for (col in 1:length(colnames(y))){
+      column = tolower( colnames(y)[col] )
+      
+      dict_var = dict %>% 
+        mutate( item_name = tolower(Item_Name)) %>%
+        filter_( ~item_name == column ) %>% # , ~file == "Household Member Recode"
+        count( value, label) %>% select(-n)
+      
+      old_value = y[, col]
+      new_value = dict_var[ match( old_value, dict_var$value ), ]$label
+      y[, col] = ifelse( is.na( new_value), old_value, new_value)
+    }
+      x[[i]] = y
+}
+
+  # if (is.null(X) ){ X <- x; next()}
+  # X = rbindlist( list(X, x), use.names = TRUE, fill = TRUE)
+  
+}
+  
+# X = dplyr:: bind_rows( x )  # will throw error is column types dont match 
+X = rbindlist(x, fill = TRUE) 
+
+#TODO FILTER RECORDS--apply filter, like keeping only children with parasitemia, is not unnecessarily large
+  
+ # if (!is.na( subset_filter ))  X = X %>% filter_( subset_filter )
+
+ saveRDS(X, "individual_bednet.rds")
+
+# object.size(X)
+
+```
+
+
+# Select **household** variables of interest for bednet study and check to see which survey file has the values
+
+Variables for number of persons in household are contained in children's file (*not* household file, as one might expect).  From a dhs forum, when linking the children's file with the household member file, the matching variables one needs to use are as follows:^[http://userforum.dhsprogram.com/index.php?t=msg&goto=2846&]
+
+v001 & hv001 - cluster number
+v002 & hv002 - household number
+b16 & hvidx - line number of child in household
+
+Note that there are children listed in the KR file who do not have data in the PR file. This is because some children of the respondent do not live in the household, but live elsewhere.
+
+
+```{r}
+
+household_vars  = c( 
+        'v136', 'v137',
+        "v001", "v002", "b16"
+       )
+  
+variables <- unique( toupper( household_vars) )
+variables = variables[ order(variables) ]
+
+# translation table of dhs file codes to file names
+filecodes = data_frame( abrev  = c("kr", "br", "ir", "pr", "hr", "hr" ), 
+                            file = c("Children's Recode","Supplemental Births Recode",
+                                     "Individual Recode",
+                                     "Household Member Recode", "Household Recode", 
+                                     "Supplemental Household Recode")) 
+
+ 
+# list variables and the files where each is found
+survey_files = dd %>% semi_join( parasitemia_surveys, by = c("country", "survey", "year") ) %>%
+    filter( Item_Name %in% variables ) %>%
+    filter( !grepl( "NA", Item_Label, ignore.case = FALSE, fixed = TRUE) ,
+            !grepl( "Presence", Item_Label, ignore.case = FALSE, fixed = TRUE)
+            ) %>%
+    left_join( filecodes , by = "file", copy = TRUE) %>%
+    mutate( 
+        abrev = ifelse( is.na(abrev) , tolower( substr(file, 3, 4) ) , abrev)
+        ) %>%
+    left_join( filecodes , by = "abrev", copy = TRUE) %>%
+    rename( file = file.y ) %>%
+    count( Item_Name, Item_Label, country, survey, year, file ) %>%
+    mutate( has = ifelse( n > 0, "Y", NA )) %>% 
+    ungroup() %>%
+    count( Item_Name, file ) %>%
+    spread( file, nn, fill = "N" )
+
+# View(dataset_surveys)
+
+kable(survey_files)
+```
+
+
+# create houshold dataset. run one time after updating variables or adding surveys
+
+```{r, eval=FALSE, include = FALSE}
+source( paste0( dhs, "getSurveyGIS.R") )
+source( "load_survey_file.R") 
+
+p <- progress_estimated(nsurveys)
+index = row.names(parasitemia_surveys)
+
+x <- list()
+
+translate = FALSE  # optional translation of values to label.  
+  # NB: Does not work well for all variables
+
+for (i in seq_along( index )  ){
+  
+   p$pause(0.1)$tick()$print()
+  
+  .country = parasitemia_surveys[i, ]$country
+  .iso3c = countrycode( parasitemia_surveys[i, ]$country, "country.name", "iso3c")
+  .survey = parasitemia_surveys[i, ]$survey
+  .year = parasitemia_surveys[i, ]$year
+  .file = "Children's Recode"
+  .survey_year = paste(.survey, .year)
+
+  print( paste(.country, .survey, .year, .file) )
+  
+  x[[i]] <- try( silent = TRUE,
+    load_survey_file( design = TRUE,
+                        # printout = TRUE ,  # un comment when testing
+                        vars = variables, 
+                        .country = .country, 
+                        .survey = .survey,
+                        .year = .year,
+                        .file = .file  )
+  )
+  
+      
+  if ( class(x[[i]]) == "try-error" ) { x[[i]] = NULL; next() }
+  
+  if ( class(x[[i]]) == "character" ) { x[[i]] = NA; next() }
+     
+
+  x[[i]]$country = rep( .country, nrow(x[[i]]) )
+  x[[i]]$iso3c = rep( .iso3c, nrow(x[[i]]) )
+  x[[i]]$year = rep( .year, nrow(x[[i]]) )
+  x[[i]]$survey = rep( .survey, nrow(x[[i]]) )
+
+  # TODO: optional- relate dictionary to survey                    )
+
+  # # TODO: only for columns with >4 values (others easier to keep as numeric)
+  # # Deriving this table should happen once, before loop
+  # v = dd %>% filter( tolower(Item_Name) %in% variables) %>% group_by( Item_Name, label ) %>% 
+  #   summarise( n = n()) %>% group_by( Item_Name) %>% count(Item_Name) %>% filter(nn>4) 
+
+  if (translate){
+    
+      # refine dictionary for this country-survey 
+      dict = dd %>% filter_( ~country == .country , ~survey == .survey, ~year == .year,
+                        ~Item_Name %in% toupper(names(has_vars))
+      )
+     
+    y = x[[i]]
+  
+    for (col in 1:length(colnames(y))){
+      column = tolower( colnames(y)[col] )
+      
+      dict_var = dict %>% 
+        mutate( item_name = tolower(Item_Name)) %>%
+        filter_( ~item_name == column ) %>% # , ~file == "Household Member Recode"
+        count( value, label) %>% select(-n)
+      
+      old_value = y[, col]
+      new_value = dict_var[ match( old_value, dict_var$value ), ]$label
+      y[, col] = ifelse( is.na( new_value), old_value, new_value)
+    }
+      x[[i]] = y
+}
+
+  # if (is.null(X) ){ X <- x; next()}
+  # X = rbindlist( list(X, x), use.names = TRUE, fill = TRUE)
+  
+}
+  
+# X = dplyr:: bind_rows( x )  # will throw error is column types dont match 
+X = rbindlist(x, fill = TRUE) 
+
+# collapse to household
+X = X %>% group_by( country, iso3c, survey, year, v001, v002 ) %>%
+    summarise(
+        v136 = max(v136, na.rm = TRUE) ,
+        v137 = max(v137, na.rm = TRUE)
+    )
+
+ saveRDS(X, "household_bednet.rds")
+
+# object.size(X)
+
+```
+
+```{r}
+members = x %>% 
+    count( country, iso3c, survey, year, hv001, hv002) %>%
+    rename( household_num = n ) %>%
+    ungroup
+
+
+# calculate avg household
+# h %>% group_by(country, iso3c, survey, year) %>% summarise( 
+#     avg_household = mean(n) 
+#     )
+
+nets = x %>% 
+    group_by( country, iso3c, survey, year, hv001, hv002) %>%
+    summarise( nets_num = max(hml1, na.rm = TRUE) ) %>%
+    ungroup
+
+h = inner_join( members, nets, 
+                by = c("country", "iso3c", "survey", "year", "hv001", "hv002"))
+
+saveRDS( h, file = "household_bednet.rds" )
+```
+
+
+# Join!  and see which surveys are included
+
+
+```{r }
+
+x = readRDS(  "individual_bednet.rds" ) %>% as_tibble()
+h = readRDS(  "household_bednet.rds" ) %>% as_tibble()
+
+# v001 & hv001 - cluster number
+# v002 & hv002 - household number
+# b16 & hvidx - line number of child in household
+
+##TODO: join childrens to household to get # persons per household, then join that with household member file.
+
+xh = inner_join( x, h, by = c( "country" = "country",
+                               "iso3c"="iso3c",
+                              "year" = "year",
+                              "survey" = "survey",
+                              "hv001" = "hv001",
+                              "hv002" = "hv002")
+)
+
+data_ncountries = length( unique(xh$country))
+data_nsurveys = nrow( count( xh, country, survey, year)  )
+nvars = ncol(xh)
+rows = nrow(xh)
+
+cat( "The combined individual/household file includes", data_nsurveys, "surveys from", data_ncountries, "countries with", nvars, "columns, ", rows, "rows and is " , comma(object.size(x)[1]), "bytes")
+
+# list surveys included
+kable( xh %>% count( country, survey, year ) , row.names = TRUE)
+```
+
+# Individual risk-ratio for bednets
+
+```{r}
+
+## Slept under net
+# filter( dd, Item_Name == "HML12") %>% count(value, label)
+slept = integer( nrow(x))
+slept[ xh$hml12 == 0] = 0
+slept[ xh$hml12 %in% 1:5] = 1
+table(slept, useNA = 'always')
+
+## is parasitemic by rdt or slide
+hml3235 = integer( nrow(x))
+hml3235[ xh$hml32 == 0 & x$hml35 == 0 ] = 0
+hml3235[ xh$hml32 == 1 | x$hml35 == 1 ] = 1
+table(hml3235, useNA = 'always')
+
+# number of nets per household (hml1) / number of persons per household (sum over hhid)
+number_nets = xh$nets_num
+
+# number of persons per household, v136, is found in children's recode
+persons_per_hh = xh$household_num
+
+net_per_person = xh$nets_num / xh$household_num
+
+
+# dataset combining variables
+d = cbind( hml3235, slept) %>%  as.data.frame()
+
+# tally
+count(d, hml3235, slept)
+
+```
+
+## GLM RR 
+
+GLM gives estimate of overall risk, and risk ratio
+
+```{r}
+library(base)
+# logistic regression for rr
+glm.logistic = glm( hml3235 ~ slept , data = d, family = binomial(link = "logit"))
+
+### Risk (intercept) and odds ratios 
+exp(coef(glm.logistic))
+
+```
+
+### classical log-binomial model
+
+```{r}
+library(base)
+# log-binomial regression for rr
+glm.log.binomial = glm( hml3235 ~ slept , data = d, family = binomial(link = "log"))
+
+### Risk (intercept) and risk ratios 
+exp(coef(glm.log.binomial))
+
+## odds ratios and 95% CI
+exp(cbind(OR = coef(glm.log.binomial), confint(glm.log.binomial)))
+```
+
+
+### calssical log-binomial model with number of bednets per person predictor
+
+```{r}
+# dataset combining variables
+d = cbind( hml3235, slept, net_per_person) %>%  as.data.frame()
+
+
+# log-binomial regression for rr
+glm.log.binomial = glm( hml3235 ~ slept + net_per_person , data = d, family = binomial(link = "log"))
+
+### Risk (intercept) and risk ratios (under poisson assumption)
+exp(coef(glm.log.binomial))
+
+```
+
+
+## GLM OR 
+```{r}
+library(base)
+# logit regression for OR
+glm.logit = glm( hml3235 ~ slept , data = d, family = binomial(link = "logit"))
+
+### OR
+exp(coef(glm.logit))
+
+logisticTransform <- function(p) { exp(p)/(1 + exp(p)) }
+logisticTransform( coef(glm.logit) )
+```
+
+## epitools package
+
+estimates RR but does not give estimate of risk
+```{r}
+library(epitools)
+r = riskratio(d$slept, d$hml3235)  
+# str(r)
+r$measure[2,]
+
+```
+
+## Bayesian, maximum a postiori (MAP) rethinking package
+
+estimates both risk (intercept)  and risk ratio--in this case OR because using binomial link function.  
+
+### logit/OR
+
+```{r}
+library(rethinking, quietly = TRUE)
+
+  rstan_options(auto_write = TRUE)
+  options(mc.cores = parallel::detectCores())
+  
+flist0 <- alist(
+    hml3235 ~ dbinom( size=1 , prob=p ) ,
+    logit(p) <- a + b * slept ,  # gives odds ratio
+    c(a,b) ~ dnorm(0,10)  # regularization
+)
+fit0 = map( flist0 , data = d)
+precis(fit0)@output
+
+# odds
+exp( precis(fit0)@output )  
+
+# proportion-rel risk
+logisticTransform <- function(p) { exp(p)/(1 + exp(p)) }
+logisticTransform( precis(fit0)@output )  
+
+```
+
+### log-binomial/RR
+
+```{r}
+library(rethinking, quietly = TRUE)
+
+  rstan_options(auto_write = TRUE)
+  options(mc.cores = parallel::detectCores())
+  
+flist0 <- alist(
+    hml3235 ~ dbinom( size=1 , prob=p ) ,
+    log(p) <- a + b * slept ,  # gives odds ratio
+    c(a,b) ~ dnorm(0, 10)  # regularization
+)
+
+fit0 = map( flist0 , data = d, 
+            start = list( a = log(.01) , b = log(1) )  # .3, and .9 from glm model
+            )
+
+precis(fit0)@output
+
+# relative risk
+exp( precis(fit0)@output )  
+
+```
+
+
+### more rethinking 
+
+MCMC via STAN
+
+```{r}
+  
+# when the quadratic approximate posterior is not a good fit, use MCMC via STAN
+# takes about 25 minutes on macbook pro
+fit0.stan <- map2stan( fit0 , data=d ) # default: warmup = 1e3, iter = 2e3
+
+precis( fit0.stan )@output
+exp( precis( fit0.stan )@output )
+logisticTransform( precis(fit0.stan)@output )  
+
+# basically--the same result
+
+
+```
+
+### Individual intercept for each survey
+
+```{r}
+
+Year = 1900 + floor( (x$hv008 - 1)/ 12 )  #convert CMC date to year
+country_year = paste0( x$country, x$year )
+country_year_id = coerce_index( country_year )
+
+# ML0 fit country
+d = as.data.frame( cbind( hml3235, slept, country_year_id) )
+
+# logit
+m.country <- alist(
+    hml3235 ~ dbinom( prob=p , size=1 ) ,
+    
+    logit(p) <- 
+        a +
+        a_survey[country_year_id] +  
+        b_slept * slept ,  
+    
+    a ~ dnorm(0, 10),
+    a_survey[country_year_id] ~ dnorm( 0 , 10 ),
+    b_slept ~ dnorm(0, 10) 
+)
+
+fit.m.country = map( m.country , data = d, 
+                     start = list( a = log(.3) , a_survey = log(1),
+                                   b_slept = log(1) ) )
+
+save(d,fit.m.country, file = "fit.m.country.rda")
+load("fit.m.country.rda")
+
+exp( precis( fit.m.country, depth = 2 )@output )
+
+#@ log
+m.country.log <- alist(
+    hml3235 ~ dbinom(  size=1 , prob=p ) ,
+    
+    log(p) <- 
+        a +
+        a_survey[country_year_id] +  
+        b_slept * slept ,  
+    
+    a ~ dnorm(0, 1),
+    a_survey[country_year_id] ~ dnorm( 0 , 10 ),
+    b_slept ~ dnorm(0, 1) 
+)
+
+fit.m.country.log = map2stan( m.country.log , data = d, iter = 200)
+# fit.m.country.log = map( m.country.log , data = d  , 
+#                      start = list( a = log(.3) , a_survey = log(1),
+#                                    b_slept = log(1) ) )
+plot(fit.m.country.log)
+
+save(d,fit.m.country.log, file = "fit.m.country.log.rda")
+load("fit.m.country.log.rda")
+
+exp( precis( fit.m.country.log, depth = 2 )@output )
+
+# refit with fewer iterations...
+fit.m.country.log.short = map2stan( m.country.log , data = d, iter = 200)
+
+# model fitting and convergence:
+# compare(fit.m.country.log, ...)
+post = extract.samples(fit.m.country.log )
+pred = predict(fit.m.country.log )
+
+x = rep( 0:1, 1000)
+y = post$a + x*post$b_slept
+plot(0,0, type = "n", xlab="slept under net", ylab = "parasitemia", ylim = 0:1,
+     xaxt = "n", xlim = 1:2
+)
+axis( 1, at = 1:2, labels = c("did not", "did") )
+lines(a:2,)
+
+
+### GLM 
+m.country.glm = glm( hml3235 ~ paste0( x$country, Year ) + slept -1 , 
+                     data = d, family = binomial(link = logit))
+
+### OR
+exp(coef(m.country.glm))
+
+
+# glimmer(hml3235 ~ paste0( x$iso3c, Year ) + slept -1, data = d, family = binomial )
+```
+
+
+## Multi-level, median a postiori rethinking package
+
+estimates both risk (intercept)  and risk ratio--in this case OR because using binomial link function.  
+
+```{r}
+
+
+  #calc year-month from CMC date
+Year = 1900 + floor( (x$hv008 - 1)/ 12 )
+Month = x$hv008 - 12 * (Year - 1900)
+
+country = coerce_index( x$iso3c )
+
+urban_rural = x$hv025
+
+psu = paste0( x$iso3c, Year, x$hv001  ) 
+psu_id = coerce_index( psu )
+
+household = paste0( x$iso3c, Year, x$hv001, x$hv002 ) 
+household_id = coerce_index( household )
+
+# ML0 fit country
+d = as.data.frame( cbind( hml3235, slept, country) )
+ml0 <- alist(
+    hml3235 ~ dbinom( prob=p , size=1 ) ,
+    logit(p) <- 
+        a_country[country] +  
+        b_slept * slept ,  
+    a_country[country] ~ dnorm( 0 , 10 ),
+    b_slept ~ dnorm(0, 10) 
+)
+fitml0 = map( ml0 , data = d)
+exp( precis(fitml0)@output )
+
+# fit country and urban/rural
+d = as.data.frame( cbind( hml3235, slept, country, urban_rural ) )
+
+ml0.1 <- alist(
+    hml3235 ~ dbinom( prob=p , size=1 ) ,
+    logit(p) <- a + 
+        a_country[country] +  
+        a_urban[urban_rural] +
+        b_slept * slept ,  
+    a_country[country] ~ dnorm( 0 , 10 ),
+    a_urban[urban_rural] ~ dnorm( 0 , 10 ),
+    c(a, b_slept) ~ dnorm(0, 10) 
+)
+fitml0.1 = map( ml0.1 , data = d)
+exp( precis(fitml0.1)@output )
+
+compare(fitml0, fitml0.1)
+
+# Map2Stan  ####
+d = as.data.frame( cbind( hml3235, slept, country) )
+ml1 <- alist(
+    hml3235 ~ dbinom(1, p) ,
+    logit(p) <- a + 
+        a_country[country] +  
+        # a_psu[psu_id] +  
+        # a_household[household_id] + 
+        b_slept * slept ,  
+    
+    a_country[country] ~ dnorm( 0 , sigma_country ),
+    # a_psu[psu_id] ~ dnorm( 0 , sigma_psu ),
+    # a_household[household_id] ~ dnorm( 0 , sigma_household ),
+    
+    c(a, b_slept) ~ dnorm(0, 10) ,
+    
+    sigma_country ~ dcauchy(0,1)
+    # sigma_psu ~ dcauchy(0,1)
+    # sigma_household ~ dcauchy(0,1)
+)
+
+# first fit 
+fit_ml1 = map2stan( ml1 , data = d, chains = 1, cores = 1) 
+exp( precis(fit_ml1, depth = 1 )@output )
+
+# full fit 
+fit_ml1.full  = map2stan( fit_ml1 , data = d , chains = 4, cores = 2) 
+exp( precis(fit_ml1.full, depth = 1 )@output)
+
+saveRDS(fit_ml1.full , "fit_ml1.full.rds")
+
+# m2 <- map2stan(  # TAKES 10 minutes to run!
+#     alist(
+#         hml3235 ~ dbinom(1, theta),
+#         logit(theta) = a + bs * slept ,
+#         a ~ dnorm(0,10),
+#         bs ~ dnorm(0,10)
+#     ) ,
+#     data=d, chains=2, cores=1 )
+# 
+# exp( precis(m2)@output )
+
+# library(arm)
+# lmer( hml3235 ~ slept , data = d)
+
+```
+
+
+
+
+
+
+
+
+# Visualize parasitemia versus bednet coverage by cluster
+
+Because the samples are paired, need to be sure that each part of the pair exists.  For a given level on x-axis, there may be only groups from high prevalence areas that all use nets, so there is no no-net group, that get compared with groups from low-prevalence areas where there are none in the use-net group.  So, the loess line is comparing groups using nets in high prevalence areas to groups not using nets in low prevalence areas; both groups may have roughly same level of risk, therefore it looks as if the nets are not protective.
+
+Possible solutions:  
+1. make sure that each cluster has a parasitemia rate for no-net and net group (filter on complete.cases() )
+
+
+## Group by cluster (hv001)
+
+```{r}
+ d1  = x %>% 
+  mutate( 
+    
+    parasitemia = ifelse( hml32 %in% 1 | hml35 %in% 1, 1, ifelse( hml32 %in% 0 | hml35 %in% 0, 0, NA) ),
+    
+    know_parasitemia = parasitemia %in% 0:1 ,
+    
+    know_net_use =  hml19 %in% 0:1 | hml20 %in% 0:1 ,
+    
+    used_net = hml19 %in% 1 | hml20 %in% 1
+    
+          ) %>%
+  
+  group_by( country, survey, year, hv001) %>%
+  
+  summarise(
+    
+    pfpr = sum( parasitemia, na.rm = TRUE ) / sum( know_parasitemia, na.rm = TRUE ),
+    
+    slept_under_net = sum( used_net, na.rm = TRUE ) / sum( know_net_use, na.rm = TRUE ),
+    
+    # net_per_person = sum( hml1, na.rm  = TRUE ) / sum( hv012, na.rm  = TRUE ),
+    
+    pfpr_net = sum( parasitemia & used_net, na.rm = TRUE ) / sum( know_parasitemia & used_net, na.rm = TRUE ),
+    
+    pfpr_no_net = sum( parasitemia & !used_net, na.rm = TRUE ) / sum( know_parasitemia & !used_net, na.rm = TRUE ),
+    
+    n = n(),
+    n_para = sum( know_parasitemia, na.rm = TRUE ),
+    n_net_para = sum( know_parasitemia & used_net, na.rm = TRUE ) ,
+    n_no_net = sum( know_parasitemia & !used_net, na.rm = TRUE )
+  ) 
+
+```
+
+```{r}
+ggplot( d1, aes( x = slept_under_net, y = pfpr)) +
+  geom_point() +
+  geom_smooth()
+
+```
+
+# Visualize parasitemia versus bednet coverage as Number of Nets per person 
+
+```{r, eval=FALSE}
+
+ggplot( d1 %>% filter( net_per_person<=1 ), aes( x = net_per_person, y = pfpr)) +
+  geom_point() +
+  geom_smooth()
+```
+
+##  Relative risk for sleeping under net
+
+```{r}
+gather_cols = c( "pfpr_net" , "pfpr_no_net")
+
+d1. = d1 %>% ungroup %>% 
+  filter( complete.cases(pfpr_net , pfpr_no_net)) %>%
+  filter( net_per_person<=1 ) %>%
+  gather_("cohort", "val" , gather_cols ) %>%
+  arrange( country, survey, year, hv001 )
+
+```
+
+```{r}
+
+ggplot( d1., aes( x = slept_under_net, y = val, color = cohort, group = cohort)) +
+  geom_point() +
+  geom_smooth()
+```
+
+```{r}
+
+ggplot( d1. , aes( x = net_per_person, y = val, color = cohort, group = cohort)) +
+  geom_point() +
+  geom_smooth()
+```
+
+# Same analysis by HOUSEHOLD (hv002), rather than PSU
+
+```{r}
+ d2 = x %>% 
+  mutate( 
+    
+    parasitemia = ifelse( hml32 %in% 1 | hml35 %in% 1, 1, ifelse( hml32 %in% 0 | hml35 %in% 0, 0, NA) ),
+    
+    know_parasitemia = parasitemia %in% 0:1 ,
+    
+    know_net_use =  hml19 %in% 0:1 | hml20 %in% 0:1 ,
+    
+    used_net = hml19 %in% 1 | hml20 %in% 1
+    
+          ) %>%
+  
+  group_by( country, survey, year, hv001, hv002) %>%
+  
+  summarise(
+    
+    pfpr = sum( parasitemia, na.rm = TRUE ) / sum( know_parasitemia, na.rm = TRUE ),
+    
+    slept_under_net = sum( used_net, na.rm = TRUE ) / sum( know_net_use, na.rm = TRUE ),
+    
+    net_per_person = sum( hml1, na.rm  = TRUE ) / sum( hv012, na.rm  = TRUE ),
+    
+    pfpr_net = sum( parasitemia & used_net, na.rm = TRUE ) / sum( know_parasitemia & used_net, na.rm = TRUE ),
+    
+    pfpr_no_net = sum( parasitemia & !used_net, na.rm = TRUE ) / sum( know_parasitemia & !used_net, na.rm = TRUE ),
+    
+    n = n(),
+    n_para = sum( know_parasitemia, na.rm = TRUE ),
+    n_net = sum( know_net_use, na.rm = TRUE ),
+    n_net_para = sum( know_parasitemia & used_net, na.rm = TRUE ) ,
+    n_no_net = sum( know_parasitemia & !used_net, na.rm = TRUE )
+  ) %>%
+  
+  mutate( rr_slept_under_net =  pfpr / slept_under_net )
+
+
+```
+
+
+```{r}
+ggplot( d2, aes( x = slept_under_net, y = pfpr)) +
+  geom_point() +
+  geom_smooth() 
+
+```
+
+```{r}
+
+ggplot( d2 %>% filter( net_per_person<=1 ), aes( x = net_per_person, y = pfpr)) +
+  geom_point() +
+  geom_smooth() 
+```
+
+## relative risk of sleeping under net by percent slept under net
+
+```{r}
+ggplot( d2 %>% filter(slept_under_net>0), 
+        aes( x = slept_under_net, 
+             y = rr_slept_under_net)
+        ) +
+  geom_point() +
+  geom_smooth() 
+
+```
+
+## relative risk of sleeping under net by number of nets / person
+
+```{r}
+ggplot( d2 %>% filter(slept_under_net>0 , 
+                      net_per_person<=1 ), 
+        aes( x = net_per_person, 
+             y = rr_slept_under_net)) +
+  geom_point() +
+  geom_smooth() 
+
+```
+
+## cohorts
+
+```{r}
+gather_cols = c( "pfpr_net" , "pfpr_no_net")
+
+d2. = d2 %>% ungroup %>% 
+  filter( complete.cases(pfpr_net , pfpr_no_net)) %>%
+  filter( net_per_person<=1 ) %>%
+  gather_("cohort", "val" , gather_cols ) %>%
+  arrange( country, survey, year, hv001, hv002 )
+
+```
+
+## Percent slept under net
+```{r}
+ggplot( d2., aes( x = slept_under_net, y = val, color = cohort, group = cohort)) +
+  geom_point() +
+  geom_smooth( ) + 
+  scale_y_continuous("PfPR", limits = c(0,1)) 
+```
+
+## Number net per person
+```{r}
+
+ggplot( d2. , aes( x = net_per_person, y = val, color = cohort, group = cohort)) +
+  geom_point() +
+  scale_y_continuous("PfPR", limits = c(0,1))  +
+  geom_smooth() 
+```
+
+
+## by country
+```{r, warning=FALSE, message= FALSE}
+
+ggplot( d2. , aes( x = net_per_person, y = val, color = cohort, group = cohort)) +
+  geom_point() +
+  geom_smooth() +
+  scale_y_continuous("PfPR", limits = c(0,1))  +
+  facet_wrap( ~country)
+```
+
+## by prevalence
+```{r, warning=FALSE, message=FALSE}
+
+ggplot( d2. %>%
+  mutate(
+        prevalence = cut( pfpr, 3) 
+  )
+, aes( x = slept_under_net, y = val, color = cohort, group = cohort)) +
+  geom_point(alpha = .5) +
+  geom_smooth() +
+  scale_y_continuous("Parasitemia", limits = c(0,1)) +
+  facet_wrap( ~ prevalence)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+
+ggplot( d2. %>%
+  mutate(
+        prevalence = cut( pfpr, 3) 
+  )
+  , aes( x = net_per_person, y = val, color = cohort, group = cohort)) +
+  geom_point(alpha = .5) +
+  geom_smooth() +
+  scale_y_continuous("Parasitemia", limits = c(0,1)) +
+  facet_wrap( ~ prevalence)
+```
+
+## by Year
+
+```{r, warning=FALSE, message=FALSE}
+
+ggplot( d2. %>%
+  mutate(
+        YRs = cut( as.numeric(substr(year, 1, 4)) , breaks = c(2006, 2010, 2012, 2015 ) )
+  ) %>% filter ( !is.na(YRs) )
+, aes( x = slept_under_net, y = val, color = cohort, group = cohort)) +
+  geom_point(alpha = .5) +
+  geom_smooth() +
+  scale_y_continuous("Parasitemia", limits = c(0,1)) +
+  facet_wrap( ~ YRs)
+```
+
+
+```{r, warning=FALSE, message=FALSE}
+
+ggplot( d2. %>%
+  mutate(
+        YRs = cut( as.numeric(substr(year, 1, 4)) , breaks = c(2006, 2010, 2012, 2015 ) )
+  ) %>% filter ( !is.na(YRs) )
+  , aes( x = net_per_person, y = val, color = cohort, group = cohort)) +
+  geom_point(alpha = .5) +
+  geom_smooth() +
+  scale_y_continuous("Parasitemia", limits = c(0,1)) +
+  facet_wrap( ~ YRs)
+```
+
+## by YRs and prevalence
+
+```{r, warning= FALSE}
+ggplot( d2. %>%
+  mutate(
+        YRs = cut( as.numeric(substr(year, 1, 4)) , breaks = c(2006, 2010, 2012, 2015 ) ),
+        prevalence = cut( pfpr, 3) 
+  ) %>% filter ( !is.na(YRs) )
+  , aes( x = slept_under_net, y = val, color = cohort, group = cohort)) +
+  geom_point(alpha = .5) +
+  geom_smooth() +
+  scale_y_continuous("Parasitemia", limits = c(0,1)) +
+  facet_wrap( prevalence ~ YRs)
+```
+ 
+```{r, warning= FALSE}
+ggplot( d2. %>%
+  mutate(
+        YRs = cut( as.numeric(substr(year, 1, 4)) , breaks = c(2006, 2010, 2012, 2015 ) ),
+        prevalence = cut( pfpr, 3) 
+  ) %>% filter ( !is.na(YRs) )
+  , aes( x = net_per_person, y = val, color = cohort, group = cohort)) +
+  geom_point(alpha = .5) +
+  geom_smooth() +
+  scale_y_continuous("Parasitemia", limits = c(0,1)) +
+  facet_wrap( prevalence ~ YRs)
+```
