@@ -79,18 +79,18 @@ parasitemia_surveys = dd %>%
   
 ```
 
-# Individual dataset
+## Household member dataset
 
 ## Select **individual** variables of interest for bednet study and check to see which survey file has the values
 
 ```{r}
 
 individual_vars  = c( 
-        'hml32', 'hml35', 
-        'hml1', 
-        'hml19', 'hml20', 'hml12',
+        'hml32', 'hml35', # RDT and micrscopy
+        'hml1', "hml4", "hml5", "hml6", "hml7", "hml8",  # bednets
+        'hml19', 'hml20', 'hml12', # slept under llin
         'hml16', # corrected age in years
-        "hv012", "hv025",
+        "hv253", # dwelling sprayed (some multiple responses)
         "hv001", "hv002", 'HV003', 'HHID', 'HVIDX',
         "HV008" # date of interview
        )
@@ -155,7 +155,7 @@ variable_defn
 ```
 
 
-## create individual dataset. run one time after updating variables or adding surveys
+## create household member dataset. run one time after updating variables or adding surveys
 
 ```{r, eval=FALSE, include = FALSE}
 source( paste0( dhs, "getSurveyGIS.R") )
@@ -253,160 +253,6 @@ X = rbindlist(x, fill = TRUE)
 
 ```
 
-# household dataset
-
-## Select **household** variables of interest for bednet study and check to see which survey file has the values
-
-Variables for number of persons in household are contained in children's file (*not* household file, as one might expect).  From a dhs forum, when linking the children's file with the household member file, the matching variables one needs to use are as follows:^[http://userforum.dhsprogram.com/index.php?t=msg&goto=2846&]
-
-v001 & hv001 - cluster number
-v002 & hv002 - household number
-b16 & hvidx - line number of child in household
-
-Note that there are children listed in the KR file who do not have data in the PR file. This is because some children of the respondent do not live in the household, but live elsewhere.
-
-
-#### create dataset from files not in household. (deprecated). run one time after updating variables or adding surveys
-
-```{r, eval = FALSE}
-
-household_vars  = c( 
-        'v136', 'v137',
-        "v001", "v002", "b16"
-       )
-  
-variables <- unique( toupper( household_vars) )
-variables = variables[ order(variables) ]
-
-# translation table of dhs file codes to file names
-filecodes = data_frame( abrev  = c("kr", "br", "ir", "pr", "hr", "hr" ), 
-                            file = c("Children's Recode","Supplemental Births Recode",
-                                     "Individual Recode",
-                                     "Household Member Recode", "Household Recode", 
-                                     "Supplemental Household Recode")) 
-
- 
-# list variables and the files where each is found
-survey_files = dd %>% semi_join( parasitemia_surveys, by = c("country", "survey", "year") ) %>%
-    filter( Item_Name %in% variables ) %>%
-    filter( !grepl( "NA", Item_Label, ignore.case = FALSE, fixed = TRUE) ,
-            !grepl( "Presence", Item_Label, ignore.case = FALSE, fixed = TRUE)
-            ) %>%
-    left_join( filecodes , by = "file", copy = TRUE) %>%
-    mutate( 
-        abrev = ifelse( is.na(abrev) , tolower( substr(file, 3, 4) ) , abrev)
-        ) %>%
-    left_join( filecodes , by = "abrev", copy = TRUE) %>%
-    rename( file = file.y ) %>%
-    count( Item_Name, Item_Label, country, survey, year, file ) %>%
-    mutate( has = ifelse( n > 0, "Y", NA )) %>% 
-    ungroup() %>%
-    count( Item_Name, file ) %>%
-    spread( file, nn, fill = "N" )
-
-# View(dataset_surveys)
-
-kable(survey_files)
-```
-
-```{r, eval=FALSE, include = FALSE}
-source( paste0( dhs, "getSurveyGIS.R") )
-source( "load_survey_file.R") 
-
-p <- progress_estimated(nsurveys)
-index = row.names(parasitemia_surveys)
-
-x <- list()
-
-translate = FALSE  # optional translation of values to label.  
-  # NB: Does not work well for all variables
-
-for (i in seq_along( index )  ){
-  
-   p$pause(0.1)$tick()$print()
-  
-  .country = parasitemia_surveys[i, ]$country
-  .iso3c = countrycode( parasitemia_surveys[i, ]$country, "country.name", "iso3c")
-  .survey = parasitemia_surveys[i, ]$survey
-  .year = parasitemia_surveys[i, ]$year
-  .file = "Children's Recode"
-  .survey_year = paste(.survey, .year)
-
-  print( paste(.country, .survey, .year, .file) )
-  
-  x[[i]] <- try( silent = TRUE,
-    load_survey_file( design = TRUE,
-                        # printout = TRUE ,  # un comment when testing
-                        vars = variables, 
-                        .country = .country, 
-                        .survey = .survey,
-                        .year = .year,
-                        .file = .file  )
-  )
-  
-      
-  if ( class(x[[i]]) == "try-error" ) { x[[i]] = NULL; next() }
-  
-  if ( class(x[[i]]) == "character" ) { x[[i]] = NA; next() }
-     
-
-  x[[i]]$country = rep( .country, nrow(x[[i]]) )
-  x[[i]]$iso3c = rep( .iso3c, nrow(x[[i]]) )
-  x[[i]]$year = rep( .year, nrow(x[[i]]) )
-  x[[i]]$survey = rep( .survey, nrow(x[[i]]) )
-
-  # TODO: optional- relate dictionary to survey                    )
-
-  # # TODO: only for columns with >4 values (others easier to keep as numeric)
-  # # Deriving this table should happen once, before loop
-  # v = dd %>% filter( tolower(Item_Name) %in% variables) %>% group_by( Item_Name, label ) %>% 
-  #   summarise( n = n()) %>% group_by( Item_Name) %>% count(Item_Name) %>% filter(nn>4) 
-
-  if (translate){
-    
-      # refine dictionary for this country-survey 
-      dict = dd %>% filter_( ~country == .country , ~survey == .survey, ~year == .year,
-                        ~Item_Name %in% toupper(names(has_vars))
-      )
-     
-    y = x[[i]]
-  
-    for (col in 1:length(colnames(y))){
-      column = tolower( colnames(y)[col] )
-      
-      dict_var = dict %>% 
-        mutate( item_name = tolower(Item_Name)) %>%
-        filter_( ~item_name == column ) %>% # , ~file == "Household Member Recode"
-        count( value, label) %>% select(-n)
-      
-      old_value = y[, col]
-      new_value = dict_var[ match( old_value, dict_var$value ), ]$label
-      y[, col] = ifelse( is.na( new_value), old_value, new_value)
-    }
-      x[[i]] = y
-}
-
-  # if (is.null(X) ){ X <- x; next()}
-  # X = rbindlist( list(X, x), use.names = TRUE, fill = TRUE)
-  
-}
-  
-# X = dplyr:: bind_rows( x )  # will throw error is column types dont match 
-X = rbindlist(x, fill = TRUE) 
-
-# collapse to household
-X = X %>% group_by( country, iso3c, survey, year, v001, v002 ) %>%
-    summarise(
-        v136 = max(v136, na.rm = TRUE) ,
-        v137 = max(v137, na.rm = TRUE)
-    )
-
- saveRDS(X, "household_bednet.rds")
-
-# object.size(X)
-
-```
-
 ## create individual file by filtering household member file to those children with parasitemia result
 
 ```{r, eval= FALSE }
@@ -426,15 +272,25 @@ hm %>%
 
 has.test.result = hm$hml32 %in% 0:1 | hm$hml35 %in% 0:1
 i = hm[ has.test.result ,  ]
-count(i, country, survey, year)
 
-cat( "There are", nrow(i), "children with a either a positve or negative parsitemia result" )
+cat( "There are", nrow(i), "children with a either a positve or negative parsitemia result from",
+     count(i, country, survey, year) %>% nrow, "surveys in ",
+     count(i, country) %>% nrow, "countries" 
+     )
 
 saveRDS(i, "individual_bednet.rds" )
 
 ```
 
 ## Create household dataset by aggregating household member file 
+
+net variables:
+- hml1: number of nets
+- hml4: months ago obtained net
+- hml5: was net treated with insecticide when obtained (binary)
+- hml6: Mosquito net treated with insecticide (6 options)
+- hml7: brand of bednet
+- hml8: bednet treated since obtaining
 
 ```{r, eval=FALSE}
 
@@ -444,7 +300,6 @@ members = hm %>%
     count( country, iso3c, survey, year, hv001, hv002) %>%
     rename( household_num = n ) %>%
     ungroup
-
 
 # calculate avg household
 # h %>% group_by(country, iso3c, survey, year) %>% summarise( 
@@ -475,9 +330,9 @@ h = readRDS(  "household_bednet.rds" ) %>% as_tibble()
 
 # v001 & hv001 - cluster number
 # v002 & hv002 - household number
-# b16 & hvidx - line number of child in household
+# b16 & hvidx - line number of child in household (for linking moms and kids)
 
-##TODO: join childrens to household to get # persons per household, then join that with household member file.
+#join childrens to household to get # persons per household, then join that with household member file.
 
 ih = inner_join( i, h, by = c( "country" = "country",
                                "iso3c"="iso3c",
@@ -487,12 +342,12 @@ ih = inner_join( i, h, by = c( "country" = "country",
                               "hv002" = "hv002")
 )
 
-data_ncountries = length( unique(xh$country))
+data_ncountries = length( unique(ih$country))
 data_nsurveys = nrow( count( ih, country, survey, year)  )
 nvars = ncol(ih)
 rows = nrow(ih)
 
-cat( "The combined individual/household file includes", data_nsurveys, "surveys from", data_ncountries, "countries with", nvars, "columns, ", rows, "rows and is " , comma(object.size(x)[1]), "bytes")
+cat( "The combined individual/household file includes", data_nsurveys, "surveys from", data_ncountries, "countries with", nvars, "columns, ", rows, "rows and is " , comma(object.size(ih)[1]), "bytes")
 
 # list surveys included
 kable( ih %>% count( country, survey, year ) , row.names = TRUE)
@@ -690,6 +545,67 @@ fit1.glm = glm( hml3235 ~ country_year_id + slept -1 ,
 ### OR
 exp(coef(fit1.glm))
 
+
+# glimmer(hml3235 ~ paste0( x$iso3c, Year ) + slept -1, data = d, family = binomial )
+```
+
+
+## GLM by country with # nets / household (fit1a)
+
+
+```{r}
+
+# Year = 1900 + floor( (i$hv008 - 1)/ 12 )  #convert CMC date to year
+country_year = paste0( i$country, i$year )
+country_year_id = factor( country_year )
+
+nets_house = ih$nets_num
+
+d = data_frame( hml3235, slept, nets_house, country_year_id) 
+
+
+#  fit 1 = variable intercept country-year (OR)
+fit1a.glm = glm( hml3235 ~ country_year_id + slept + nets_house + slept*nets_house -1 , 
+                data = d, 
+                family = binomial(link = logit)
+                )
+
+
+### OR
+exp(coef(fit1a.glm))
+
+# exp( confint( fit1a.glm)) # slower , but more acurate
+
+exp( confint.default( fit1a.glm))
+
+# glimmer(hml3235 ~ paste0( x$iso3c, Year ) + slept -1, data = d, family = binomial )
+```
+
+## GLM by country with # nets / person (fit1b)
+
+
+```{r}
+
+# Year = 1900 + floor( (i$hv008 - 1)/ 12 )  #convert CMC date to year
+country_year = paste0( i$country, i$year )
+country_year_id = factor( country_year )
+
+nets_person = ih$nets_num / ih$household_num
+
+d = data_frame( hml3235, slept, nets_house, country_year_id) 
+
+
+#  fit 1 = variable intercept country-year (OR)
+fit1b.glm = glm( hml3235 ~ country_year_id + slept + nets_person + slept*nets_person -1 , 
+                data = d, 
+                family = binomial(link = logit)
+                )
+
+
+### OR
+exp(coef(fit1b.glm))
+
+exp( confint.default( fit1b.glm))
 
 # glimmer(hml3235 ~ paste0( x$iso3c, Year ) + slept -1, data = d, family = binomial )
 ```
