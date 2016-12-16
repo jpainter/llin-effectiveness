@@ -22,7 +22,9 @@ opts_chunk$set( echo = TRUE, cache = TRUE )
 dhs = "../DHS/"
 ```
 
-# Select country/surveys to include 
+# Survey datasets
+
+## Select country/surveys to include 
 
 ```{r}
 
@@ -77,7 +79,9 @@ parasitemia_surveys = dd %>%
   
 ```
 
-# Select **individual** variables of interest for bednet study and check to see which survey file has the values
+# Individual dataset
+
+## Select **individual** variables of interest for bednet study and check to see which survey file has the values
 
 ```{r}
 
@@ -125,7 +129,7 @@ survey_files = dd %>% semi_join( parasitemia_surveys ) %>%
 kable(survey_files)
 ```
 
-# variable definitions...
+## variable definitions...
 
 Select the first available definition from dictionary.  Note that some variables may be defined differently for some countries, which will not be apparent here. 
 
@@ -151,7 +155,7 @@ variable_defn
 ```
 
 
-# create individual dataset. run one time after updating variables or adding surveys
+## create individual dataset. run one time after updating variables or adding surveys
 
 ```{r, eval=FALSE, include = FALSE}
 source( paste0( dhs, "getSurveyGIS.R") )
@@ -244,14 +248,14 @@ X = rbindlist(x, fill = TRUE)
   
  # if (!is.na( subset_filter ))  X = X %>% filter_( subset_filter )
 
- saveRDS(X, "individual_bednet.rds")
-
-# object.size(X)
+ saveRDS(X, "household_member_bednet.rds")
+ # object.size(X)
 
 ```
 
+# household dataset
 
-# Select **household** variables of interest for bednet study and check to see which survey file has the values
+## Select **household** variables of interest for bednet study and check to see which survey file has the values
 
 Variables for number of persons in household are contained in children's file (*not* household file, as one might expect).  From a dhs forum, when linking the children's file with the household member file, the matching variables one needs to use are as follows:^[http://userforum.dhsprogram.com/index.php?t=msg&goto=2846&]
 
@@ -262,7 +266,9 @@ b16 & hvidx - line number of child in household
 Note that there are children listed in the KR file who do not have data in the PR file. This is because some children of the respondent do not live in the household, but live elsewhere.
 
 
-```{r}
+#### create dataset from files not in household. (deprecated). run one time after updating variables or adding surveys
+
+```{r, eval = FALSE}
 
 household_vars  = c( 
         'v136', 'v137',
@@ -302,9 +308,6 @@ survey_files = dd %>% semi_join( parasitemia_surveys, by = c("country", "survey"
 
 kable(survey_files)
 ```
-
-
-# create houshold dataset. run one time after updating variables or adding surveys
 
 ```{r, eval=FALSE, include = FALSE}
 source( paste0( dhs, "getSurveyGIS.R") )
@@ -404,8 +407,40 @@ X = X %>% group_by( country, iso3c, survey, year, v001, v002 ) %>%
 
 ```
 
-```{r}
-members = x %>% 
+## create individual file by filtering household member file to those children with parasitemia result
+
+```{r, eval= FALSE }
+hm = readRDS( "household_member_bednet.rds"  ) %>% as_tibble()
+
+ # These countries were supposed to have results, but there are none...
+hm %>% 
+    mutate(
+        RDT = hml32 %in% 0:1 ,
+        slide = hml35 %in% 0:1 
+    ) %>%
+    count( country, survey, year, RDT, slide ) %>% ungroup %>%
+    count( country, survey, year ) %>% filter(nn == 1)
+    
+    
+# filter to those with parsitemia result
+
+has.test.result = hm$hml32 %in% 0:1 | hm$hml35 %in% 0:1
+i = hm[ has.test.result ,  ]
+count(i, country, survey, year)
+
+cat( "There are", nrow(i), "children with a either a positve or negative parsitemia result" )
+
+saveRDS(i, "individual_bednet.rds" )
+
+```
+
+## Create household dataset by aggregating household member file 
+
+```{r, eval=FALSE}
+
+hm = readRDS( "household_member_bednet.rds"  ) %>% as_tibble()
+
+members = hm %>% 
     count( country, iso3c, survey, year, hv001, hv002) %>%
     rename( household_num = n ) %>%
     ungroup
@@ -416,7 +451,7 @@ members = x %>%
 #     avg_household = mean(n) 
 #     )
 
-nets = x %>% 
+nets = hm %>% 
     group_by( country, iso3c, survey, year, hv001, hv002) %>%
     summarise( nets_num = max(hml1, na.rm = TRUE) ) %>%
     ungroup
@@ -424,16 +459,18 @@ nets = x %>%
 h = inner_join( members, nets, 
                 by = c("country", "iso3c", "survey", "year", "hv001", "hv002"))
 
+cat("there are", nrow(h), "households")
+
 saveRDS( h, file = "household_bednet.rds" )
 ```
 
 
-# Join!  and see which surveys are included
+# Load datasets and see which surveys are included
 
 
 ```{r }
 
-x = readRDS(  "individual_bednet.rds" ) %>% as_tibble()
+i = readRDS(  "individual_bednet.rds" ) %>% as_tibble()
 h = readRDS(  "household_bednet.rds" ) %>% as_tibble()
 
 # v001 & hv001 - cluster number
@@ -442,7 +479,7 @@ h = readRDS(  "household_bednet.rds" ) %>% as_tibble()
 
 ##TODO: join childrens to household to get # persons per household, then join that with household member file.
 
-xh = inner_join( x, h, by = c( "country" = "country",
+ih = inner_join( i, h, by = c( "country" = "country",
                                "iso3c"="iso3c",
                               "year" = "year",
                               "survey" = "survey",
@@ -451,47 +488,52 @@ xh = inner_join( x, h, by = c( "country" = "country",
 )
 
 data_ncountries = length( unique(xh$country))
-data_nsurveys = nrow( count( xh, country, survey, year)  )
-nvars = ncol(xh)
-rows = nrow(xh)
+data_nsurveys = nrow( count( ih, country, survey, year)  )
+nvars = ncol(ih)
+rows = nrow(ih)
 
 cat( "The combined individual/household file includes", data_nsurveys, "surveys from", data_ncountries, "countries with", nvars, "columns, ", rows, "rows and is " , comma(object.size(x)[1]), "bytes")
 
 # list surveys included
-kable( xh %>% count( country, survey, year ) , row.names = TRUE)
+kable( ih %>% count( country, survey, year ) , row.names = TRUE)
 ```
 
-# Individual risk-ratio for bednets
+# Individual risk-ratio for bednets (fit0)
 
 ```{r}
 
+
+
 ## Slept under net
 # filter( dd, Item_Name == "HML12") %>% count(value, label)
-slept = integer( nrow(x))
-slept[ xh$hml12 == 0] = 0
-slept[ xh$hml12 %in% 1:5] = 1
-table(slept, useNA = 'always')
+slept = integer( nrow(i))
+slept[ i$hml12 %in% 1:5] = 1
+
+ts = table(slept, useNA = 'always') 
+ts
+
+p = function(n0, yes){ yes/(n0 + yes)}
+
+p(ts[1], ts[2])
+
+
 
 ## is parasitemic by rdt or slide
-hml3235 = integer( nrow(x))
-hml3235[ xh$hml32 == 0 & x$hml35 == 0 ] = 0
-hml3235[ xh$hml32 == 1 | x$hml35 == 1 ] = 1
-table(hml3235, useNA = 'always')
+hml3235 = integer( nrow(i))
+hml3235[ i$hml32 == 1 | i$hml35 == 1 ] = 1
 
-# number of nets per household (hml1) / number of persons per household (sum over hhid)
-number_nets = xh$nets_num
-
-# number of persons per household, v136, is found in children's recode
-persons_per_hh = xh$household_num
-
-net_per_person = xh$nets_num / xh$household_num
+tp = table(hml3235, useNA = 'always')
+tp
+p(tp[1], tp[2])
 
 
 # dataset combining variables
 d = cbind( hml3235, slept) %>%  as.data.frame()
 
 # tally
-count(d, hml3235, slept)
+count(d, hml3235, slept) 
+
+
 
 ```
 
@@ -522,50 +564,21 @@ exp(coef(glm.logistic))
 
 ```
 
+
 ### classical log-binomial model (RR)
 
 ```{r}
-library(base)
-# log-binomial regression for rr
-glm.log.binomial = glm( hml3235 ~ slept , data = d, family = binomial(link = "log"))
-
-### Risk (intercept) and risk ratios 
-exp(coef(glm.log.binomial))
-
-## odds ratios and 95% CI
-exp(cbind(OR = coef(glm.log.binomial), confint(glm.log.binomial)))
-```
-
-
-### classical log-binomial model with number of bednets per person predictor
-
-```{r}
 # dataset combining variables
-d = cbind( hml3235, slept, net_per_person) %>%  as.data.frame()
+d = cbind( hml3235, slept) %>%  as.data.frame()
 
 
 # log-binomial regression for rr
-glm.log.binomial = glm( hml3235 ~ slept + net_per_person , data = d, family = binomial(link = "log"))
+glm.log.binomial = glm( hml3235 ~ slept  , data = d, family = binomial(link = "log"))
 
 ### Risk (intercept) and risk ratios (under poisson assumption)
 exp(coef(glm.log.binomial))
 
 ```
-
-
-## GLM OR 
-```{r}
-library(base)
-# logit regression for OR
-glm.logit = glm( hml3235 ~ slept , data = d, family = binomial(link = "logit"))
-
-### OR
-exp(coef(glm.logit))
-
-logisticTransform <- function(p) { exp(p)/(1 + exp(p)) }
-logisticTransform( coef(glm.logit) )
-```
-
 
 
 ## Bayesian, maximum a postiori (MAP) rethinking package
@@ -575,6 +588,10 @@ estimates both risk (intercept)  and risk ratio--in this case OR because using b
 ### logit/OR
 
 ```{r}
+
+# dataset combining variables
+d = cbind( hml3235, slept) %>%  as.data.frame()
+
 library(rethinking, quietly = TRUE)
 
   rstan_options(auto_write = TRUE)
@@ -585,7 +602,9 @@ flist0 <- alist(
     logit(p) <- a + b * slept ,  # gives odds ratio
     c(a,b) ~ dnorm(0,10)  # regularization
 )
+
 fit0 = map( flist0 , data = d)
+
 precis(fit0)@output
 
 # odds
@@ -600,6 +619,10 @@ exp( precis(fit0)@output )
 ### log-binomial/RR
 
 ```{r}
+
+# dataset combining variables
+d = cbind( hml3235, slept) %>%  as.data.frame()
+
 library(rethinking, quietly = TRUE)
 
   rstan_options(auto_write = TRUE)
@@ -615,10 +638,13 @@ fit0 = map( flist0 , data = d,
             start = list( a = log(.01) , b = log(1) )  # .3, and .9 from glm model
             )
 
-precis(fit0)@output
+# precis(fit0)@output
 
 # relative risk
 exp( precis(fit0)@output )  
+
+# convergence
+plot(fit0)
 
 ```
 
@@ -631,28 +657,69 @@ MCMC via STAN
   
 # when the quadratic approximate posterior is not a good fit, use MCMC via STAN
 # takes about 25 minutes on macbook pro
-fit0.stan <- map2stan( fit0 , data=d ) # default: warmup = 1e3, iter = 2e3
+fit0.stan <- map2stan( fit0 , data=d , warmup = 100, iter = 200 ) # default: warmup = 1e3, iter = 2e3
 
 precis( fit0.stan )@output
 exp( precis( fit0.stan )@output )
-logisticTransform( precis(fit0.stan)@output )  
 
 # basically--the same result
 
 
 ```
 
-### Individual intercept for each survey
+
+# Individual intercept for each survey
+## GLM by country (fit1)
+```{r}
+
+Year = 1900 + floor( (i$hv008 - 1)/ 12 )  #convert CMC date to year
+country_year = paste0( i$country, i$year )
+country_year_id = factor( country_year )
+
+
+d = data_frame( hml3235, slept, country_year_id) 
+
+
+#  fit 1 = variable intercept country-year (OR)
+fit1.glm = glm( hml3235 ~ country_year_id + slept -1 , 
+                data = d, 
+                family = binomial(link = logit)
+                )
+
+
+### OR
+exp(coef(fit1.glm))
+
+
+# glimmer(hml3235 ~ paste0( x$iso3c, Year ) + slept -1, data = d, family = binomial )
+```
+
+## GLM by cluster (fit2)
 
 ```{r}
 
-Year = 1900 + floor( (x$hv008 - 1)/ 12 )  #convert CMC date to year
-country_year = paste0( x$country, x$year )
-country_year_id = coerce_index( country_year )
+Year = 1900 + floor( (i$hv008 - 1)/ 12 )  #convert CMC date to year
+country_year_cluster = paste0( i$country, i$year, i$hv001 )
+country_year_cluster_id = factor( country_year_cluster )
 
-# ML0 fit country
-d = as.data.frame( cbind( hml3235, slept, country_year_id) )
+d = data.frame( cbind( hml3235, slept, country_year_cluster) )
 
+
+#  fit 2 = variable intercept country-year-cluster (OR)
+fit2.glm = glm( hml3235 ~ country_year_cluster_id + slept -1 , 
+                      data = d, 
+                      family = binomial(link = logit))
+
+### OR
+exp(coef(fit2.glm))
+
+
+# glimmer(hml3235 ~ paste0( x$iso3c, Year ) + slept -1, data = d, family = binomial )
+```
+
+### Map2Stan version of individual intercepts for each survey
+
+```{r}
 # logit
 m.country <- alist(
     hml3235 ~ dbinom( prob=p , size=1 ) ,
@@ -717,17 +784,12 @@ plot(0,0, type = "n", xlab="slept under net", ylab = "parasitemia", ylim = 0:1,
 axis( 1, at = 1:2, labels = c("did not", "did") )
 lines(a:2,)
 
-
-### GLM 
-m.country.glm = glm( hml3235 ~ paste0( x$country, Year ) + slept -1 , 
-                     data = d, family = binomial(link = logit))
-
-### OR
-exp(coef(m.country.glm))
-
-
-# glimmer(hml3235 ~ paste0( x$iso3c, Year ) + slept -1, data = d, family = binomial )
 ```
+
+
+
+
+
 
 
 ## Multi-level, median a postiori rethinking package
@@ -830,13 +892,7 @@ saveRDS(fit_ml1.full , "fit_ml1.full.rds")
 ```
 
 
-
-
-
-
-
-
-# Visualize parasitemia versus bednet coverage by cluster
+## Visualize parasitemia versus bednet coverage by cluster
 
 Because the samples are paired, need to be sure that each part of the pair exists.  For a given level on x-axis, there may be only groups from high prevalence areas that all use nets, so there is no no-net group, that get compared with groups from low-prevalence areas where there are none in the use-net group.  So, the loess line is comparing groups using nets in high prevalence areas to groups not using nets in low prevalence areas; both groups may have roughly same level of risk, therefore it looks as if the nets are not protective.
 
