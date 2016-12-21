@@ -513,21 +513,21 @@ library(rethinking, quietly = TRUE)
   
 flist0 <- alist(
     hml3235 ~ dbinom( size=1 , prob=p ) ,
-    log(p) <- a + b * slept ,  # gives odds ratio
+    log(p) <- a + b * slept ,  # gives RR
     c(a,b) ~ dnorm(0, 10)  # regularization
 )
 
-fit0 = map( flist0 , data = d, 
-            start = list( a = log(.01) , b = log(1) )  # .3, and .9 from glm model
+fit0.map = map( flist0 , data = d, 
+            start = list( a = log(.3) , b = log(.9) )  # .3, and .9 from glm model
             )
 
 # precis(fit0)@output
 
 # relative risk
-exp( precis(fit0)@output )  
+exp( precis(fit0.map)@output )  
 
 # convergence
-plot(fit0)
+# plot(fit0.map)
 
 ```
 
@@ -553,7 +553,10 @@ exp( precis( fit0.stan )@output )
 
 
 # Individual intercept for each survey
-## GLM by country (fit1)
+## by country (fit1)
+
+### glm
+
 ```{r}
 
 Year = 1900 + floor( (i$hv008 - 1)/ 12 )  #convert CMC date to year
@@ -590,23 +593,80 @@ coef(fit1.lmer)
 exp(fixef(fit1.lmer))
 ```
 
-## GLM by country with # nets / household (fit1a)
+### map
+
+```{r}
+Year = 1900 + floor( (i$hv008 - 1)/ 12 )  #convert CMC date to year
+country_year = paste0( i$country, i$year )
+country_year_id = factor( country_year )
+
+
+d = data.frame( hml3235, slept, country_year_id) 
+
+flist1 <- alist(
+    hml3235 ~ dbinom( size=1 , prob=p ) ,
+    logit(p) <- 
+        a_country[country_year_id] +  
+        b_slept * slept ,  
+    a_country[country_year_id] ~ dnorm( 0 , 10 ),
+    b_slept ~ dnorm(0, 10)  
+)
+
+fit1.map = map( flist1 , data = d, 
+            start = list( 
+                # a_country[country_year_id] = log(.3) , 
+                b_slept = log(.9) )  # .3, and .9 from glm model
+            )
+
+saveRDS( fit1.map, file="fit1.map.rds")
+readRDS( "fit1.map.rds" )
+
+# relative risk
+exp( precis(fit1.map)@output )  
+
+# compare
+compare( fit0.map, fit1.map )
+
+# convergence
+# plot(fit0.map)
+
+```
+
+## By country with # nets / household (fit1a)
 
 
 ```{r}
-
 # Year = 1900 + floor( (i$hv008 - 1)/ 12 )  #convert CMC date to year
 country_year = paste0( i$country, i$year )
 country_year_id = factor( country_year )
 
 nets_house = ih$nets_num_household
 
-d = data_frame( hml3235, slept, nets_house, country_year_id) 
+country_year = paste0( i$country, i$year )
+country_year_id = factor( country_year )
+
+nets_house = ih$nets_num_household
+hist(nets_house)
+hist(log(1+ nets_house))
+hist( scale(nets_house))
+hist( scale( log(1+ nets_house)) )
+
+with(ih, table(slept, nets_num_household))
+num_nets = ifelse( ih$nets_num_household >=13, 13, ih$nets_num_household )
+
+
+d1a = data_frame( hml3235, slept, num_nets, country_year_id) 
+
+```
+
+### glm 
+
+```{r}
 
 
 #  fit 1 = variable intercept country-year (OR)
-fit1a.glm = glm( hml3235 ~ country_year_id + slept + nets_house + slept*nets_house -1 , 
-                data = d, 
+fit1a.glm = glm( hml3235 ~ country_year_id + slept + num_nets + slept*num_nets -1 , 
+                data = d1a, 
                 family = binomial(link = logit)
                 )
 
@@ -625,17 +685,9 @@ exp( confint.default( fit1a.glm))
 
 ```{r}
 
-country_year = paste0( i$country, i$year )
-country_year_id = factor( country_year )
-
-nets_house = ih$nets_num_household
-
-d = data_frame( hml3235, slept, nets_house, country_year_id) 
-
-
-fit1a.lmer = glmer( hml3235 ~ slept + nets_house +  slept*nets_house + (1 | country_year_id ), 
+fit1a.lmer = glmer( hml3235 ~ slept + num_nets +  slept * num_nets + (1 | country_year_id ), 
                     family = binomial(link = "logit"),
-                   data = d)
+                   data = d1a)
 
 # summary(fit1a.lmer)
 # coef(fit1a.lmer) 
@@ -652,28 +704,60 @@ exp(fixef(fit1a.lmer))
 post = extract.samples( fit1a.lmer )
 precis( exp(post), corr = TRUE)
 
-slept.seq =  c(rep(0,8), rep(1,8))
-nets_house.seq = rep(0:7, 2)
+slept.seq =  c(rep(0,14), rep(1,14))
+num_nets.seq = rep(0:13, 2)
 
-link.fit1a.lmer = function( slept, nets_house){ 
-    post$Intercept + post$slept*slept + post$nets_house*nets_house + 
-        post$`slept:nets_house`*slept*nets_house
+link.fit1a.lmer = function( slept, num_nets){ 
+    post$Intercept + post$slept*slept + 
+        post$num_nets * num_nets + 
+        post$`slept:num_nets` * slept * num_nets
 }
 
-mu = mapply( link.fit1a.lmer, slept.seq, nets_house.seq)
+mu = mapply( link.fit1a.lmer, slept.seq, num_nets.seq)
 
 pred.p = exp(apply( mu, 2, mean))
 pred.PI = exp( apply( mu, 2, PI ))
 
-pred = data.frame( slept.seq, nets_house.seq, pred.p, t( pred.PI ) )
+pred = data.frame( slept.seq, num_nets.seq, pred.p, t( pred.PI ) )
 
 ggplot( pred, aes(slept.seq, pred.p) ) + geom_line() + 
+    geom_ribbon(aes( ymin = X5., ymax = X94.), alpha = .2) +
     scale_x_continuous( breaks = 0:1) +
-    facet_wrap(~ nets_house.seq)
+    facet_wrap(~ num_nets.seq)
 ```
 
-## GLM by country with # nets / person (fit1b)
+## By country with # person (fit1b)
 
+
+```{r}
+# Year = 1900 + floor( (i$hv008 - 1)/ 12 )  #convert CMC date to year
+country_year = paste0( i$country, i$year )
+country_year_id = factor( country_year )
+
+household_num = ih$household_num
+
+hist(household_num)
+hist(log(1+ household_num))
+hist( scale(household_num))
+hist( scale( log(1+ household_num)) )
+
+with(ih, table(slept, household_num))
+
+# create number of persons categories
+num_persons.f = cut( 
+    household_num, breaks = c( seq(1, 34, 3), Inf), 
+    include.lowest = TRUE , right = FALSE
+    ) # summary(num_persons.f)
+
+num_persons = as.numeric( num_persons.f )  # convert to numeric
+
+# use factor levels to interpret ranges, e.g. levels( num_persons.f)[4]
+
+d1b = data_frame( hml3235, slept, num_persons, country_year_id) 
+
+```
+
+### glm
 
 ```{r}
 
@@ -683,10 +767,10 @@ country_year_id = factor( country_year )
 
 nets_person = ih$nets_num_household / ih$household_num
 
-d = data_frame( hml3235, slept, nets_person, country_year_id) 
+d = data_frame( hml3235, slept, num_persons.f, country_year_id) 
 
 #  fit 1 = variable intercept country-year (OR)
-fit1b.glm = glm( hml3235 ~ country_year_id + slept + nets_person + slept*nets_person -1 , 
+fit1b.glm = glm( hml3235 ~ country_year_id + slept + num_persons.f + slept*num_persons.f -1 , 
                 data = d, 
                 family = binomial(link = logit)
                 )
@@ -704,17 +788,12 @@ exp( confint.default( fit1b.glm))
 
 ```{r}
 
-country_year = paste0( i$country, i$year )
-country_year_id = factor( country_year )
-
-nets_person = ih$nets_num_household / ih$household_num
-
-d = data_frame( hml3235, slept, nets_person, country_year_id) 
-
-
-fit1b.lmer = glmer( hml3235 ~ slept + nets_person + + slept*nets_person + (1 | country_year_id ), 
+fit1b.lmer = glmer( hml3235 ~ slept + 
+                        num_persons + 
+                        slept * num_persons + 
+                        (1 | country_year_id ), 
                     family = binomial(link = "logit"),
-                   data = d)
+                   data = d1b)
 
 # summary(fit1b.lmer)
 # coef(fit1b.lmer) 
@@ -726,39 +805,132 @@ exp(fixef(fit1b.lmer))
 
 ```{r}
 
-summary(ih$nets_num_household)
-summary( ih$household_num )
-summary(nets_person)
-
-
 post = extract.samples( fit1b.lmer )
 precis( exp(post), corr = TRUE)
 
-
-slept.seq =  c(rep(0,8), rep(1,8))
-nets_person.seq = rep( seq(0,1.4, .2), 2)
+slept.seq =  c(rep(0,12), rep(1,12))
+num_persons.seq = rep( 1:12, 2)
 
 post = extract.samples( fit1b.lmer )
-link.fit1b.lmer = function( slept, nets_person){ 
-    post$Intercept + post$slept*slept + post$nets_person*nets_person + 
-        post$`slept:nets_person`*slept*nets_person
+
+link.fit1b.lmer = function( slept, num_persons){ 
+    post$Intercept +
+        post$slept * slept + 
+        post$num_persons * num_persons + 
+        post$`slept:num_persons` * slept * num_persons
 }
-mu = mapply( link.fit1b.lmer, slept.seq, nets_person.seq)
+mu = mapply( link.fit1b.lmer, slept.seq, num_persons.seq)
+
+o2p = function(x) x/(1+x) # convert odds to probaility (after converting log-odds to odds)
+pred.p = o2p( exp( apply( mu, 2, mean) ) )
+pred.PI = o2p( exp( apply( mu, 2, PI ) ) )
+
+pred = data.frame( slept.seq, num_persons.seq, pred.p, t( pred.PI ) )
+
+# calc RR
+num_persons.seq = 1:12
+
+linkRR.fit1b.lmer = function( num_persons){ 
+    sleep0 = post$Intercept +
+        post$slept * 0 + 
+        post$num_persons * num_persons + 
+        post$`slept:num_persons` * 0 * num_persons
+    
+    sleep1 = post$Intercept +
+        post$slept * 1 + 
+        post$num_persons * num_persons + 
+        post$`slept:num_persons` * 1 * num_persons
+    
+    RR = o2p( exp( sleep1 ) )  /  o2p( exp( sleep0 ) )
+    
+    return(RR)
+}
+mu.rr = mapply( linkRR.fit1b.lmer, num_persons.seq)
+pred.rr = apply( mu.rr, 2, mean) 
+pred.rr.PI = apply( mu.rr, 2, PI )
+rr = data.frame( num_persons.seq, pred.rr, t( pred.rr.PI ))
+rr$label = paste( round(rr$pred.rr,2) ,"[", round(rr$X5.,2) ,"-", round(rr$X94.,2), "]" )
+
+num_persons_labeller = function(variable,value) levels(num_persons.f)[value] 
+
+ggplot( pred, aes(slept.seq, pred.p)) + 
+    geom_line() + 
+    geom_ribbon(aes( ymin = X5., ymax = X94.), alpha = .2) +
+    geom_label( data = rr, x=.5, y=.4, aes(label = label)) +
+    scale_x_continuous( breaks = 0:1) +
+    facet_wrap(~ num_persons.seq, labeller = num_persons_labeller ) +
+    ggtitle("Effect of sleeping under net", subtitle = "by number of persons in household")
+
+```
+
+
+## By country with # nets and # persons (fit1c)
+
+### glmer
+
+```{r}
+
+country_year = paste0( i$country, i$year )
+country_year_id = factor( country_year )
+
+num_nets =  ih$nets_num_household
+num_persons = ih$household_num
+
+d = data_frame( hml3235, slept, num_nets, num_persons, country_year_id) 
+
+
+fit1c.lmer = glmer( hml3235 ~ slept + 
+                        num_nets + 
+                        num_persons +  
+                        # slept*num_nets + 
+                        # slept*num_persons + 
+                        (1 | country_year_id ), 
+                    family = binomial(link = "logit"),
+                   data = d)
+
+# summary(fit1b.lmer)
+# coef(fit1b.lmer) 
+exp(fixef(fit1c.lmer))
+
+```
+
+### 'rethinking' post-analysis
+
+```{r}
+summary(num_persons)
+
+post = extract.samples( fit1c.lmer )
+precis( exp(post), corr = TRUE)
+
+slept.seq =  rep( c(rep(0,8), rep(1,8)), 2)
+num_nets.seq = rep(0:7, 4)
+num_persons.seq = rep( seq(1, 15, 2) , 4)
+
+post = extract.samples( fit1b.lmer )
+link.fit1c.lmer = function( slept, num_nets, num_persons){ 
+    post$Intercept +
+        post$slept*slept + 
+        post$num_nets * num_nets + 
+        post$num_persons * num_persons
+}
+mu = mapply( link.fit1c.lmer, slept.seq, num_nets.seq, num_persons.seq)
 
 pred.p = exp(apply( mu, 2, mean))
 pred.PI = exp(apply( mu, 2, PI ))
 
-pred = data.frame( slept.seq, nets_person.seq, pred.p, t( pred.PI ) )
+pred = data.frame( slept.seq, num_nets.seq, num_persons.seq, pred.p, t( pred.PI ) )
 
 ggplot( pred, aes(slept.seq, pred.p)) + geom_line() + 
-        scale_x_continuous( breaks = 0:1) +
-    facet_wrap(~ nets_person.seq)
+    geom_ribbon(aes( ymin = X5., ymax = X94.), alpha = .2) +
+    scale_x_continuous( breaks = 0:1) +
+    facet_wrap( num_nets.seq ~ num_persons.seq)
 ```
 
 ### compare models
 
 ```{r}
 compare( fit1a.lmer , fit1b.lmer )
+
 ```
 
 
