@@ -558,10 +558,9 @@ exp( precis( fit0.stan )@output )
 
 
 
-# Individual intercept for each survey
+# Individual intercept for each survey (fit1)
 
 primarily using lmer() for modeling effect 
-## by country (fit1)
 
 ### lmer
 
@@ -1005,7 +1004,7 @@ ggplot( pred, aes(slept.seq, pred.p)) +
 
 
 
-# Varying slopes
+# Varying slopes (fit2)
 ## By country with wealth index (fit2d)
 
 ### glmer
