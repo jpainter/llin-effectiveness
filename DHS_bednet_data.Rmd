@@ -19,6 +19,8 @@ library(countrycode)
 library(lme4)
 library(rethinking)
 
+library(GGally)
+
 opts_chunk$set( echo = TRUE, cache = TRUE )
 
 # location of DHS folder.  include DHS files as: paste0( dhs, <dhs file here>)
@@ -95,7 +97,9 @@ individual_vars  = c(
         'hml16', # corrected age in years
         "hv253", # dwelling sprayed (some multiple responses)
         "hv001", "hv002", 'HV003', 'HHID', 'HVIDX',
-        "HV008" # date of interview
+        "HV008", # date of interview
+        "HV270", # wealth index
+        "latitude", "longitude"
        )
   
 variables <- unique( toupper( individual_vars) )
@@ -196,7 +200,8 @@ for (i in seq_along( index )  ){
                         .country = .country, 
                         .survey = .survey,
                         .year = .year,
-                        .file = .file  )
+                        .file = .file ,
+                      geo = TRUE)
   )
   
       
@@ -252,7 +257,7 @@ X = rbindlist(x, fill = TRUE)
  # if (!is.na( subset_filter ))  X = X %>% filter_( subset_filter )
 
  saveRDS(X, "household_member_bednet.rds")
- # object.size(X)
+ # comma(object.size(X))
 
 ```
 
@@ -341,7 +346,7 @@ summary( h$nets_person)
 
 # pairs( h %>% select( nets_num_household, household_num, nets_person) )
 
-library(GGally)
+
 ggpairs(h, columns=c("nets_num_household", "household_num", "nets_person"))
 
 
@@ -382,6 +387,8 @@ kable( ih %>% count( country, survey, year ) , row.names = TRUE)
 ```
 
 # Individual risk-ratio for bednets (fit0)
+
+with several methods for calculating effect
 
 ```{r}
 
@@ -475,7 +482,6 @@ estimates both risk (intercept)  and risk ratio--in this case OR because using b
 # dataset combining variables
 d = cbind( hml3235, slept) %>%  as.data.frame()
 
-library(rethinking, quietly = TRUE)
 
   rstan_options(auto_write = TRUE)
   options(mc.cores = parallel::detectCores())
@@ -553,33 +559,9 @@ exp( precis( fit0.stan )@output )
 
 
 # Individual intercept for each survey
+
+primarily using lmer() for modeling effect 
 ## by country (fit1)
-
-### glm
-
-```{r}
-
-Year = 1900 + floor( (i$hv008 - 1)/ 12 )  #convert CMC date to year
-country_year = paste0( i$country, i$year )
-country_year_id = factor( country_year )
-
-
-d = data_frame( hml3235, slept, country_year_id) 
-
-
-#  fit 1 = variable intercept country-year (OR)
-fit1.glm = glm( hml3235 ~ country_year_id + slept -1 , 
-                data = d, 
-                family = binomial(link = logit)
-                )
-
-
-### OR
-exp(coef(fit1.glm))
-
-
-# glimmer(hml3235 ~ paste0( x$iso3c, Year ) + slept -1, data = d, family = binomial )
-```
 
 ### lmer
 
@@ -870,26 +852,20 @@ ggplot( pred, aes(slept.seq, pred.p)) +
 
 ```{r}
 
-country_year = paste0( i$country, i$year )
-country_year_id = factor( country_year )
-
-num_nets =  ih$nets_num_household
-num_persons = ih$household_num
-
 d = data_frame( hml3235, slept, num_nets, num_persons, country_year_id) 
 
 
 fit1c.lmer = glmer( hml3235 ~ slept + 
                         num_nets + 
                         num_persons +  
-                        # slept*num_nets + 
-                        # slept*num_persons + 
+                        slept * num_nets +
+                        slept * num_persons +
                         (1 | country_year_id ), 
                     family = binomial(link = "logit"),
                    data = d)
 
-# summary(fit1b.lmer)
-# coef(fit1b.lmer) 
+# summary(fit1c.lmer)
+# coef(fit1c.lmer) 
 exp(fixef(fit1c.lmer))
 
 ```
@@ -897,21 +873,25 @@ exp(fixef(fit1c.lmer))
 ### 'rethinking' post-analysis
 
 ```{r}
-summary(num_persons)
 
 post = extract.samples( fit1c.lmer )
 precis( exp(post), corr = TRUE)
 
-slept.seq =  rep( c(rep(0,8), rep(1,8)), 2)
-num_nets.seq = rep(0:7, 4)
-num_persons.seq = rep( seq(1, 15, 2) , 4)
+grid = expand.grid( slept.seq = 0:1, 
+                    num_nets.seq = 0:7, 
+                    num_persons.seq = 1:12)
 
-post = extract.samples( fit1b.lmer )
+slept.seq =  grid[[1]]
+num_nets.seq = grid[[2]]
+num_persons.seq = grid[[3]]
+
 link.fit1c.lmer = function( slept, num_nets, num_persons){ 
     post$Intercept +
-        post$slept*slept + 
+        post$slept * slept + 
         post$num_nets * num_nets + 
-        post$num_persons * num_persons
+        post$num_persons * num_persons +
+        post$`slept:num_nets` * slept * num_nets +
+        post$`slept:num_persons`  * slept * num_persons
 }
 mu = mapply( link.fit1c.lmer, slept.seq, num_nets.seq, num_persons.seq)
 
@@ -923,10 +903,203 @@ pred = data.frame( slept.seq, num_nets.seq, num_persons.seq, pred.p, t( pred.PI 
 ggplot( pred, aes(slept.seq, pred.p)) + geom_line() + 
     geom_ribbon(aes( ymin = X5., ymax = X94.), alpha = .2) +
     scale_x_continuous( breaks = 0:1) +
-    facet_wrap( num_nets.seq ~ num_persons.seq)
+    facet_grid( num_persons.seq ~ num_nets.seq )
+
 ```
 
 ### compare models
+
+```{r}
+compare( fit1a.lmer , fit1b.lmer )
+
+```
+
+
+## By country with wealth index (fit1d)
+
+### glmer
+
+```{r}
+
+count(ih, hv270)
+
+wealth = ih$hv270
+
+d = data_frame( hml3235, slept, wealth, country_year_id) 
+
+
+fit1d.lmer = glmer( hml3235 ~ slept + 
+                        wealth + 
+                        slept * wealth +
+                        (1 | country_year_id ), 
+                    family = binomial(link = "logit"),
+                   data = d)
+
+# summary(fit1c.lmer)
+# coef(fit1c.lmer) 
+exp(fixef(fit1d.lmer))
+
+```
+
+### 'rethinking' post-analysis
+
+```{r}
+
+post = extract.samples( fit1d.lmer )
+
+precis( exp(post), corr = TRUE)
+
+grid = expand.grid( slept.seq = 0:1, 
+                    wealth.seq = 1:5)
+
+slept.seq =  grid[[1]]
+wealth.seq = grid[[2]]
+
+link.fit1d.lmer = function( slept, wealth){ 
+    post$Intercept +
+        post$slept * slept + 
+        post$wealth * wealth + 
+        post$`slept:wealth`  * slept * wealth
+}
+mu = mapply( link.fit1d.lmer, slept.seq, wealth.seq)
+
+pred.p = exp(apply( mu, 2, mean))
+pred.PI = exp(apply( mu, 2, PI ))
+
+pred = data.frame( slept.seq, wealth.seq, pred.p, t( pred.PI ) )
+
+# calc RR
+num_persons.seq = 1:12
+
+linkRR.fit1d.lmer = function( wealth){ 
+    sleep0 = post$Intercept +
+        post$slept * 0 + 
+        post$wealth * wealth + 
+        post$`slept:wealth` * 0 * wealth
+    
+    sleep1 = post$Intercept +
+        post$slept * 1 + 
+        post$wealth * wealth + 
+        post$`slept:wealth` * 1 * wealth
+    
+    RR = o2p( exp( sleep1 ) )  /  o2p( exp( sleep0 ) )
+    
+    return(RR)
+}
+mu.rr = mapply( linkRR.fit1d.lmer, wealth.seq)
+pred.rr = apply( mu.rr, 2, mean) 
+pred.rr.PI = apply( mu.rr, 2, PI )
+rr = data.frame( wealth.seq, pred.rr, t( pred.rr.PI ))
+rr$label = paste( round(rr$pred.rr,2) ,"[", round(rr$X5.,2) ,"-", round(rr$X94.,2), "]" )
+
+ggplot( pred, aes(slept.seq, pred.p)) + 
+    geom_line() + 
+    geom_ribbon(aes( ymin = X5., ymax = X94.), alpha = .2) +
+    geom_label( data = rr, x=.5, y=.4, aes(label = label)) +
+    scale_x_continuous( breaks = 0:1) +
+    facet_grid(. ~ wealth.seq) +
+    ggtitle("Effect of sleeping under net", subtitle = "by wealth quintile (varying intercept)")
+
+```
+
+
+
+
+# Varying slopes
+## By country with wealth index (fit2d)
+
+### glmer
+
+```{r}
+
+count(ih, hv270)
+
+wealth = ih$hv270
+
+d = data_frame( hml3235, slept, wealth, country_year_id) 
+
+
+fit2d.lmer = glmer( hml3235 ~ slept + 
+                        wealth + 
+                        slept * wealth +
+                        (1 + slept + wealth| country_year_id ), 
+                    family = binomial(link = "logit"),
+                   data = d)
+
+# summary(fit2d.lmer)
+# coef(fit2d.lmer) 
+exp(fixef(fit2d.lmer))
+
+# compare with model 1d
+# (Intercept)        slept       wealth slept:wealth 
+#    1.0446968    0.9842546    0.6659320    0.9761877 
+
+```
+
+### 'rethinking' post-analysis
+
+```{r}
+
+post = extract.samples( fit2d.lmer )
+
+precis( exp(post), corr = TRUE)
+
+grid = expand.grid( slept.seq = 0:1, 
+                    wealth.seq = 1:5)
+
+slept.seq =  grid[[1]]
+wealth.seq = grid[[2]]
+
+link.fit2d.lmer = function( slept, wealth){ 
+    post$Intercept +
+        post$slept * slept + 
+        post$wealth * wealth + 
+        post$`slept:wealth`  * slept * wealth
+}
+mu = mapply( link.fit1d.lmer, slept.seq, wealth.seq)
+
+pred.p = exp(apply( mu, 2, mean))
+pred.PI = exp(apply( mu, 2, PI ))
+
+pred = data.frame( slept.seq, wealth.seq, pred.p, t( pred.PI ) )
+
+# calc RR
+num_persons.seq = 1:12
+
+linkRR.fit2d.lmer = function( wealth){ 
+    sleep0 = post$Intercept +
+        post$slept * 0 + 
+        post$wealth * wealth + 
+        post$`slept:wealth` * 0 * wealth
+    
+    sleep1 = post$Intercept +
+        post$slept * 1 + 
+        post$wealth * wealth + 
+        post$`slept:wealth` * 1 * wealth
+    
+    RR = o2p( exp( sleep1 ) )  /  o2p( exp( sleep0 ) )
+    
+    return(RR)
+}
+mu.rr = mapply( linkRR.fit2d.lmer, wealth.seq)
+pred.rr = apply( mu.rr, 2, mean) 
+pred.rr.PI = apply( mu.rr, 2, PI )
+rr = data.frame( wealth.seq, pred.rr, t( pred.rr.PI ))
+rr$label = paste0( round(rr$pred.rr,2) ,"\n[", round(rr$X5.,2) ,"-", round(rr$X94.,2), "]" )
+
+ggplot( pred, aes(slept.seq, pred.p)) + 
+    geom_line() + 
+    geom_ribbon(aes( ymin = X5., ymax = X94.), alpha = .2) +
+    geom_label( data = rr, x=.5, y=.9, aes(label = label)) +
+    scale_x_continuous( breaks = 0:1) +
+    facet_grid(. ~ wealth.seq) +
+    ggtitle("Effect of sleeping under net", subtitle = "by wealth quintile (varying intercept and slope.  fit2d.)")
+
+```
+
+
+
+# compare models
 
 ```{r}
 compare( fit1a.lmer , fit1b.lmer )
@@ -1022,7 +1195,6 @@ plot(0,0, type = "n", xlab="slept under net", ylab = "parasitemia", ylim = 0:1,
      xaxt = "n", xlim = 1:2
 )
 axis( 1, at = 1:2, labels = c("did not", "did") )
-lines(a:2,)
 
 ```
 
@@ -1185,245 +1357,3 @@ ggplot( d1, aes( x = slept_under_net, y = pfpr)) +
 
 ```
 
-# Visualize parasitemia versus bednet coverage as Number of Nets per person 
-
-```{r, eval=FALSE}
-
-ggplot( d1 %>% filter( net_per_person<=1 ), aes( x = net_per_person, y = pfpr)) +
-  geom_point() +
-  geom_smooth()
-```
-
-##  Relative risk for sleeping under net
-
-```{r}
-gather_cols = c( "pfpr_net" , "pfpr_no_net")
-
-d1. = d1 %>% ungroup %>% 
-  filter( complete.cases(pfpr_net , pfpr_no_net)) %>%
-  filter( net_per_person<=1 ) %>%
-  gather_("cohort", "val" , gather_cols ) %>%
-  arrange( country, survey, year, hv001 )
-
-```
-
-```{r}
-
-ggplot( d1., aes( x = slept_under_net, y = val, color = cohort, group = cohort)) +
-  geom_point() +
-  geom_smooth()
-```
-
-```{r}
-
-ggplot( d1. , aes( x = net_per_person, y = val, color = cohort, group = cohort)) +
-  geom_point() +
-  geom_smooth()
-```
-
-# Same analysis by HOUSEHOLD (hv002), rather than PSU
-
-```{r}
- d2 = x %>% 
-  mutate( 
-    
-    parasitemia = ifelse( hml32 %in% 1 | hml35 %in% 1, 1, ifelse( hml32 %in% 0 | hml35 %in% 0, 0, NA) ),
-    
-    know_parasitemia = parasitemia %in% 0:1 ,
-    
-    know_net_use =  hml19 %in% 0:1 | hml20 %in% 0:1 ,
-    
-    used_net = hml19 %in% 1 | hml20 %in% 1
-    
-          ) %>%
-  
-  group_by( country, survey, year, hv001, hv002) %>%
-  
-  summarise(
-    
-    pfpr = sum( parasitemia, na.rm = TRUE ) / sum( know_parasitemia, na.rm = TRUE ),
-    
-    slept_under_net = sum( used_net, na.rm = TRUE ) / sum( know_net_use, na.rm = TRUE ),
-    
-    net_per_person = sum( hml1, na.rm  = TRUE ) / sum( hv012, na.rm  = TRUE ),
-    
-    pfpr_net = sum( parasitemia & used_net, na.rm = TRUE ) / sum( know_parasitemia & used_net, na.rm = TRUE ),
-    
-    pfpr_no_net = sum( parasitemia & !used_net, na.rm = TRUE ) / sum( know_parasitemia & !used_net, na.rm = TRUE ),
-    
-    n = n(),
-    n_para = sum( know_parasitemia, na.rm = TRUE ),
-    n_net = sum( know_net_use, na.rm = TRUE ),
-    n_net_para = sum( know_parasitemia & used_net, na.rm = TRUE ) ,
-    n_no_net = sum( know_parasitemia & !used_net, na.rm = TRUE )
-  ) %>%
-  
-  mutate( rr_slept_under_net =  pfpr / slept_under_net )
-
-
-```
-
-
-```{r}
-ggplot( d2, aes( x = slept_under_net, y = pfpr)) +
-  geom_point() +
-  geom_smooth() 
-
-```
-
-```{r}
-
-ggplot( d2 %>% filter( net_per_person<=1 ), aes( x = net_per_person, y = pfpr)) +
-  geom_point() +
-  geom_smooth() 
-```
-
-## relative risk of sleeping under net by percent slept under net
-
-```{r}
-ggplot( d2 %>% filter(slept_under_net>0), 
-        aes( x = slept_under_net, 
-             y = rr_slept_under_net)
-        ) +
-  geom_point() +
-  geom_smooth() 
-
-```
-
-## relative risk of sleeping under net by number of nets / person
-
-```{r}
-ggplot( d2 %>% filter(slept_under_net>0 , 
-                      net_per_person<=1 ), 
-        aes( x = net_per_person, 
-             y = rr_slept_under_net)) +
-  geom_point() +
-  geom_smooth() 
-
-```
-
-## cohorts
-
-```{r}
-gather_cols = c( "pfpr_net" , "pfpr_no_net")
-
-d2. = d2 %>% ungroup %>% 
-  filter( complete.cases(pfpr_net , pfpr_no_net)) %>%
-  filter( net_per_person<=1 ) %>%
-  gather_("cohort", "val" , gather_cols ) %>%
-  arrange( country, survey, year, hv001, hv002 )
-
-```
-
-## Percent slept under net
-```{r}
-ggplot( d2., aes( x = slept_under_net, y = val, color = cohort, group = cohort)) +
-  geom_point() +
-  geom_smooth( ) + 
-  scale_y_continuous("PfPR", limits = c(0,1)) 
-```
-
-## Number net per person
-```{r}
-
-ggplot( d2. , aes( x = net_per_person, y = val, color = cohort, group = cohort)) +
-  geom_point() +
-  scale_y_continuous("PfPR", limits = c(0,1))  +
-  geom_smooth() 
-```
-
-
-## by country
-```{r, warning=FALSE, message= FALSE}
-
-ggplot( d2. , aes( x = net_per_person, y = val, color = cohort, group = cohort)) +
-  geom_point() +
-  geom_smooth() +
-  scale_y_continuous("PfPR", limits = c(0,1))  +
-  facet_wrap( ~country)
-```
-
-## by prevalence
-```{r, warning=FALSE, message=FALSE}
-
-ggplot( d2. %>%
-  mutate(
-        prevalence = cut( pfpr, 3) 
-  )
-, aes( x = slept_under_net, y = val, color = cohort, group = cohort)) +
-  geom_point(alpha = .5) +
-  geom_smooth() +
-  scale_y_continuous("Parasitemia", limits = c(0,1)) +
-  facet_wrap( ~ prevalence)
-```
-
-
-```{r, warning=FALSE, message=FALSE}
-
-ggplot( d2. %>%
-  mutate(
-        prevalence = cut( pfpr, 3) 
-  )
-  , aes( x = net_per_person, y = val, color = cohort, group = cohort)) +
-  geom_point(alpha = .5) +
-  geom_smooth() +
-  scale_y_continuous("Parasitemia", limits = c(0,1)) +
-  facet_wrap( ~ prevalence)
-```
-
-## by Year
-
-```{r, warning=FALSE, message=FALSE}
-
-ggplot( d2. %>%
-  mutate(
-        YRs = cut( as.numeric(substr(year, 1, 4)) , breaks = c(2006, 2010, 2012, 2015 ) )
-  ) %>% filter ( !is.na(YRs) )
-, aes( x = slept_under_net, y = val, color = cohort, group = cohort)) +
-  geom_point(alpha = .5) +
-  geom_smooth() +
-  scale_y_continuous("Parasitemia", limits = c(0,1)) +
-  facet_wrap( ~ YRs)
-```
-
-
-```{r, warning=FALSE, message=FALSE}
-
-ggplot( d2. %>%
-  mutate(
-        YRs = cut( as.numeric(substr(year, 1, 4)) , breaks = c(2006, 2010, 2012, 2015 ) )
-  ) %>% filter ( !is.na(YRs) )
-  , aes( x = net_per_person, y = val, color = cohort, group = cohort)) +
-  geom_point(alpha = .5) +
-  geom_smooth() +
-  scale_y_continuous("Parasitemia", limits = c(0,1)) +
-  facet_wrap( ~ YRs)
-```
-
-## by YRs and prevalence
-
-```{r, warning= FALSE}
-ggplot( d2. %>%
-  mutate(
-        YRs = cut( as.numeric(substr(year, 1, 4)) , breaks = c(2006, 2010, 2012, 2015 ) ),
-        prevalence = cut( pfpr, 3) 
-  ) %>% filter ( !is.na(YRs) )
-  , aes( x = slept_under_net, y = val, color = cohort, group = cohort)) +
-  geom_point(alpha = .5) +
-  geom_smooth() +
-  scale_y_continuous("Parasitemia", limits = c(0,1)) +
-  facet_wrap( prevalence ~ YRs)
-```
- 
-```{r, warning= FALSE}
-ggplot( d2. %>%
-  mutate(
-        YRs = cut( as.numeric(substr(year, 1, 4)) , breaks = c(2006, 2010, 2012, 2015 ) ),
-        prevalence = cut( pfpr, 3) 
-  ) %>% filter ( !is.na(YRs) )
-  , aes( x = net_per_person, y = val, color = cohort, group = cohort)) +
-  geom_point(alpha = .5) +
-  geom_smooth() +
-  scale_y_continuous("Parasitemia", limits = c(0,1)) +
-  facet_wrap( prevalence ~ YRs)
-```
