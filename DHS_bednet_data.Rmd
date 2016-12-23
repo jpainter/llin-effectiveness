@@ -380,8 +380,7 @@ ggpairs(h, columns=c("nets_num_household", "household_num", "nets_person"))
 ```
 
 
-# Load datasets and see which surveys are included
-
+# START ANALYSES HERE( once dataset created, above) Load datasets and see which surveys are included
 
 ```{r }
 
@@ -412,10 +411,6 @@ cat( "The combined individual/household file includes", data_nsurveys, "surveys 
 # list surveys included
 kable( ih %>% count( country, survey, year ) , row.names = TRUE)
 ```
-
-# Individual risk-ratio for bednets (fit0)
-
-with several methods for calculating effect
 
 ```{r}
 
@@ -450,10 +445,20 @@ d = cbind( hml3235, slept) %>%  as.data.frame()
 # tally
 count(d, hml3235, slept) 
 
+# Year = 1900 + floor( (i$hv008 - 1)/ 12 )  #convert CMC date to year
+country_year = paste0( i$country, i$year )
+country_year_id = factor( country_year )
 
+nets_person = ih$nets_num_household / ih$household_num
+summary(nets_person)
 
+# helper function to convert odds to proportion
+o2p = function(x) x/(1+x) # convert odds to probaility (after converting log-odds to odds)
 ```
 
+# Individual risk-ratio for bednets (fit0)
+
+with several methods for calculating effect
 
 ## epitools package
 
@@ -769,11 +774,6 @@ d1b = data_frame( hml3235, slept, num_persons, country_year_id)
 
 ```{r}
 
-# Year = 1900 + floor( (i$hv008 - 1)/ 12 )  #convert CMC date to year
-country_year = paste0( i$country, i$year )
-country_year_id = factor( country_year )
-
-nets_person = ih$nets_num_household / ih$household_num
 
 d = data_frame( hml3235, slept, num_persons.f, country_year_id) 
 
@@ -829,7 +829,6 @@ link.fit1b.lmer = function( slept, num_persons){
 }
 mu = mapply( link.fit1b.lmer, slept.seq, num_persons.seq)
 
-o2p = function(x) x/(1+x) # convert odds to probaility (after converting log-odds to odds)
 pred.p = o2p( exp( apply( mu, 2, mean) ) )
 pred.PI = o2p( exp( apply( mu, 2, PI ) ) )
 
@@ -1028,6 +1027,94 @@ ggplot( pred, aes(slept.seq, pred.p)) +
 
 ```
 
+
+
+
+## By country with urban / rural  (fit1e)
+
+### glmer
+
+```{r}
+
+count(ih, hv025) # 1 is urban , 2 is rural
+
+rural = ih$hv025 - 1 # 0 is urban , 1 is rural
+
+d = data_frame( hml3235, slept, rural, country_year_id) 
+
+
+fit1e.lmer = glmer( hml3235 ~ slept + 
+                        rural + 
+                        slept * rural +
+                        (1 | country_year_id ), 
+                    family = binomial(link = "logit"),
+                   data = d)
+
+# summary(fit1c.lmer)
+# coef(fit1c.lmer) 
+exp(fixef(fit1e.lmer))
+
+```
+
+### 'rethinking' post-analysis
+
+```{r}
+
+post = extract.samples( fit1e.lmer )
+
+precis( exp(post), corr = TRUE)
+
+grid = expand.grid( slept.seq = 0:1, 
+                    rural.seq = 0:1)
+
+slept.seq =  grid[[1]]
+rural.seq = grid[[2]]
+
+link.fit1e.lmer = function( slept, rural){ 
+    post$Intercept +
+        post$slept * slept + 
+        post$rural * rural + 
+        post$`slept:rural`  * slept * rural
+}
+mu = mapply( link.fit1e.lmer, slept.seq, rural.seq)
+
+pred.p = exp(apply( mu, 2, mean))
+pred.PI = exp(apply( mu, 2, PI ))
+
+pred = data.frame( slept.seq, rural.seq, pred.p, t( pred.PI ) )
+
+# calc RR
+
+linkRR.fit1e.lmer = function( rural){ 
+    sleep0 = post$Intercept +
+        post$slept * 0 + 
+        post$rural * rural + 
+        post$`slept:rural` * 0 * rural
+    
+    sleep1 = post$Intercept +
+        post$slept * 1 + 
+        post$rural * rural + 
+        post$`slept:rural` * 1 * rural
+    
+    RR = o2p( exp( sleep1 ) )  /  o2p( exp( sleep0 ) )
+    
+    return(RR)
+}
+mu.rr = mapply( linkRR.fit1e.lmer, rural.seq)
+pred.rr = apply( mu.rr, 2, mean) 
+pred.rr.PI = apply( mu.rr, 2, PI )
+rr = data.frame( rural.seq, pred.rr, t( pred.rr.PI ))
+rr$label = paste( round(rr$pred.rr,2) ,"[", round(rr$X5.,2) ,"-", round(rr$X94.,2), "]" )
+
+ggplot( pred, aes(slept.seq, pred.p)) + 
+    geom_line() + 
+    geom_ribbon(aes( ymin = X5., ymax = X94.), alpha = .2) +
+    geom_label( data = rr, x=.5, y=.4, aes(label = label)) +
+    scale_x_continuous( breaks = 0:1) +
+    facet_grid(. ~ rural.seq) +
+    ggtitle("Effect of sleeping under net", subtitle = "by urban/rural")
+
+```
 
 
 
