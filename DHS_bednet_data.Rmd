@@ -94,6 +94,8 @@ individual_vars  = c(
         'hml32', 'hml35', # RDT and micrscopy
         'hml1', "hml4", "hml5", "hml6", "hml7", "hml8",  # bednets
         'hml19', 'hml20', 'hml12', # slept under llin
+        'hv102', # de jure member of household
+        'hv103', # de facto memeber of household (slept there last night)
         'hml16', # corrected age in years
         "hv253", # dwelling sprayed (some multiple responses)
         "hv001", "hv002", 'HV003', 'HHID', 'HVIDX',
@@ -194,7 +196,7 @@ for (i in seq_along( index )  ){
   print( paste(.country, .survey, .year, .file) )
   
   x[[i]] <- try( silent = TRUE,
-    load_survey_file( design = FALSE,
+    load_survey_file( 
                         # printout = TRUE ,  # un comment when testing
                         vars = variables, 
                         .country = .country, 
@@ -252,9 +254,11 @@ for (i in seq_along( index )  ){
 # X = dplyr:: bind_rows( x )  # will throw error is column types dont match 
 X = rbindlist(x, fill = TRUE) 
 
-#TODO FILTER RECORDS--apply filter, like keeping only children with parasitemia, is not unnecessarily large
-  
- # if (!is.na( subset_filter ))  X = X %>% filter_( subset_filter )
+# De Facto members only
+
+defacto = X %>% count(hv103)
+
+X = X %>%  filter( hv103 == 1 ) # de facto members only (i.e. slept in house previous night)
 
  saveRDS(X, "household_member_bednet.rds")
  # comma(object.size(X))
@@ -285,7 +289,8 @@ cat( "There are", nrow(i), "children with a either a positve or negative parsite
      count(i, country, survey, year) %>% nrow, "surveys in ",
      count(i, country) %>% nrow, "countries" 
      )
-
+    
+    
 saveRDS(i, "individual_bednet.rds" )
 
 ```
@@ -305,11 +310,13 @@ net variables:
 hm = readRDS( "household_member_bednet.rds"  ) %>% as_tibble()
 
 members = hm %>% 
+
     count( country, iso3c, survey, year, hv001, hv002) %>%
     rename( household_num = n ) %>%
     ungroup
 
 summary( members$household_num )
+quantile( members$household_num , probs = seq(0,1,.1))
 
 # calculate avg household
 # h %>% group_by(country, iso3c, survey, year) %>% summarise( 
@@ -322,11 +329,32 @@ nets = hm %>%
     summarise( nets_num_household = max(nets_num_household, na.rm = TRUE) ) %>%
     ungroup
 
+summary(nets$nets_num_household)  # NB: there are 6 houeholds with NA
+
+
 h = inner_join( members, nets, 
                 by = c("country", "iso3c", "survey", "year", "hv001", "hv002")) %>%
     mutate(
         nets_person = nets_num_household / household_num
     )
+
+summary( h$household_num )
+quantile( h$household_num , probs = seq(0,1,.1))
+
+summary( h$nets_num_household )
+quantile( h$nets_num_household , probs = seq(0,1,.1))
+
+percentiles = sapply( h[, c("household_num", "nets_num_household")], 
+        function(x) quantile(x, probs = seq(0,1,.01), na.rm = TRUE) ) %>%
+    as.data.frame() %>% 
+    mutate( percentile = factor(row.names(.) , levels=row.names(.) ) ) %>%
+    gather(var, value, -percentile)
+    
+
+ggplot( percentiles, aes( x = value, y = percentile, group = var)) + 
+    geom_line() + scale_y_discrete( breaks = percentiles$percentile[1 +seq(0,100,10)] ) + 
+    facet_wrap(~var, scale = 'free')
+
 
 cat("there are", nrow(h), "households")
 

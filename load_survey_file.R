@@ -3,7 +3,7 @@ library(dplyr)
 
 
 # functions for loading data files ####
-if (!existsFunction( "survey_GIS_data" ) ) source( "getSurveyGIS.R")
+if (!existsFunction( "survey_GIS_data" ) ) source( "../DHS/getSurveyGIS.R")
 
 openSurveyFile = function(
     country = NA ,
@@ -103,8 +103,14 @@ load_survey_file = function(
     if (geo){
         g = try(
             survey_GIS_data( country = .country,  survey = .survey, year = .year)
+            
         )
+        
+        if ( class(g) == "data.frame" ) x = x %>% left_join(g, by=c("hv001"="dhsid") )
+            
     } else {  g = NULL }
+    
+    
     
     # include available data
     vars_in_x = sapply(vars, function(y)  y %in% names(x))  # check if variable is in dataset
