@@ -98,7 +98,12 @@ individual_vars  = c(
         'hv103', # de facto memeber of household (slept there last night)
         'hml16', # corrected age in years
         "hv253", # dwelling sprayed (some multiple responses)
-        "hv001", "hv002", 'HV003', 'HHID', 'HVIDX',
+        "hv001", "hv002", 'HV003', 'HV005', 
+        "HV025" , # type of residence : urban rural
+        "HV021", # psu: enumeration area or sample cluster
+        "HV022", # Sample stratum number
+        "hv023", # STRATA
+        'HHID', 'HVIDX',
         "HV008", # date of interview
         "HV270", # wealth index
         "latitude", "longitude"
@@ -337,12 +342,6 @@ h = inner_join( members, nets,
     mutate(
         nets_person = nets_num_household / household_num
     )
-
-summary( h$household_num )
-quantile( h$household_num , probs = seq(0,1,.1))
-
-summary( h$nets_num_household )
-quantile( h$nets_num_household , probs = seq(0,1,.1))
 
 percentiles = sapply( h[, c("household_num", "nets_num_household")], 
         function(x) quantile(x, probs = seq(0,1,.01), na.rm = TRUE) ) %>%
