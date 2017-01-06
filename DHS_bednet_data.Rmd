@@ -13,6 +13,7 @@ library(knitr)
 library(scales, quietly = TRUE)
 library(data.table)
 library(dtplyr)
+library(matrixStats)
 library(tidyverse, quietly = TRUE)
 library(countrycode)
 
@@ -99,10 +100,13 @@ individual_vars  = c(
         'hml16', # corrected age in years
         "hv253", # dwelling sprayed (some multiple responses)
         "hv001", "hv002", 'HV003', 'HV005', 
-        "HV025" , # type of residence : urban rural
+
         "HV021", # psu: enumeration area or sample cluster
         "HV022", # Sample stratum number
         "hv023", # STRATA
+        "hv024", # region
+        "HV025" , # type of residence : urban rural
+        
         'HHID', 'HVIDX',
         "HV008", # date of interview
         "HV270", # wealth index
@@ -312,8 +316,7 @@ net variables:
 
 ```{r, eval=FALSE}
 
-hm = readRDS( "household_member_bednet.rds"  ) %>% as_tibble()
-
+# number of household members
 members = hm %>% 
 
     count( country, iso3c, survey, year, hv001, hv002) %>%
@@ -328,17 +331,62 @@ quantile( members$household_num , probs = seq(0,1,.1))
 #     avg_household = mean(n) 
 #     )
 
+# number of bednets in house
 nets = hm %>% 
     mutate( nets_num_household = ifelse( hml1 %in% 98:99, NA, hml1)) %>%  # 98=don't know; 99 = missing
     group_by( country, iso3c, survey, year, hv001, hv002) %>%
-    summarise( nets_num_household = max(nets_num_household, na.rm = TRUE) ) %>%
+    summarise( 
+        household_num = n(), # number of persons in household
+        nets_num_household = max(nets_num_household, na.rm = TRUE), # No. of nets per household
+        slept = sum( hml19 %in% 1 ),  # if unknown, then assume did not. # number sleeping under net
+        slept.itn =  sum( hml12 %in% 1) # if unknown, then assume did not. # number sleeping under ITN
+        ) %>%
+    mutate( 
+        pct.net.itn = slept.itn / slept,
+        pct.slept = slept / household_num , 
+        nets_person = nets_num_household / household_num ,
+        net.gap = household_num - nets_num_household,
+        net.surplus = nets_num_household - household_num  
+        ) %>%
+    mutate( 
+        net.gap.0 =  (net.gap > 0) * net.gap ,
+        net.gap.person = net.gap.0 / household_num,
+        net.surplus.0 =  (net.surplus > 0) * net.surplus ,
+        net.surplus.person = net.surplus.0 / household_num
+            ) %>%
     ungroup
 
+summary( nets$household_num)
 summary(nets$nets_num_household)  # NB: there are 6 houeholds with NA
+summary( nets$slept)
+summary( nets$slept.tx)
+summary( nets$pct.net.tx)
+summary(nets$nets_person)
+summary( nets$net.gap)
+summary( nets$net.gap.0)
+summary( nets$net.gap.person)
+summary( nets$net.surplus.0)
+summary( nets$net.surplus.person)
 
+# number in house who slept under bednet, or treated bednet
+slept.hm = hm %>% 
+    group_by( country, iso3c, survey, year, hv001, hv002) %>%
+    summarise( slept = sum( hml19 %in% 1 ),  # if unknown, then assume did not.
+               slept.tx =  sum( hml12 %in% 1) # if unknown, then assume did not.
+               ) %>%
+    mutate( 
+        pct.net.tx = slept.tx / slept )
+    ungroup
+    
+summary( slept.hm$slept)
+summary( slept.hm$slept.tx)
+summary( slept.hm$pct.net.tx)
 
+# number of nets per person
 h = inner_join( members, nets, 
                 by = c("country", "iso3c", "survey", "year", "hv001", "hv002")) %>%
+    rename( household_num = household_num.x) %>%
+    select( -household_num.y ) %>%
     mutate(
         nets_person = nets_num_household / household_num
     )
